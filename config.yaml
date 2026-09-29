@@ -1,0 +1,113 @@
+# Max configuration. Edit freely; restart Max to apply.
+
+assistant:
+  name: Max
+  user_name: Manas
+  # How many tool-calling rounds the agent may take for one request
+  max_steps: 6
+
+llm:
+  host: http://127.0.0.1:11434
+  # Small model that lives on the GPU and handles most commands fast.
+  # Must be the -instruct tag: plain qwen3:4b is now the Thinking-2507 build, which
+  # always reasons (hundreds of hidden tokens per reply, even with think: false).
+  fast_model: qwen3:4b-instruct
+  # Bigger model loaded only when a request needs real planning/reasoning
+  planner_model: qwen3:8b
+  # How long Ollama keeps a model in VRAM after the last request
+  keep_alive: 15m
+  temperature: 0.3
+  # Qwen3 "thinking" mode is slow on a 4GB GPU; keep it off for snappy replies
+  think: false
+  request_timeout_s: 180
+  # Context window in tokens. Prompt + tools is ~1.3k; 4096 leaves room for history
+  # while keeping the 4b model fully on a 4 GB GPU (also set OLLAMA_FLASH_ATTENTION=1
+  # and OLLAMA_KV_CACHE_TYPE=q8_0 for Ollama; setup.ps1 does this)
+  num_ctx: 4096
+  # Max tokens per reply; spoken answers are short, this stops runaway output
+  num_predict: 256
+  # Force all of the fast model's layers onto the GPU. Ollama's own estimate leaves ~1 GB
+  # unused here and splits the model with the CPU (measured 33 -> 52 tokens/s). If loading
+  # fails (e.g. a game holding VRAM) it retries with Ollama's default. Remove to disable.
+  fast_model_gpu_layers: 99
+
+wake_word:
+  # sherpa: listens for `phrase` below, any English words, no training.
+  # openwakeword: pre-trained models only (e.g. hey_jarvis).
+  # If the chosen engine fails to load, it falls back to openWakeWord "Hey Jarvis".
+  engine: sherpa
+  phrase: Hey Max
+  # Seconds to ignore the wake word after it fires (prevents one call firing twice)
+  cooldown_s: 1.0
+  sherpa:
+    model_dir: models/kws/gigaspeech-3.3M
+    # 0..1, raise if it triggers by accident, lower if it misses you
+    threshold: 0.25
+    # How strongly decoding favours the phrase; raise a little if it misses you
+    boost: 1.0
+    # Parallel decoders offset in time so the phrase is caught wherever it falls
+    # (1 stream misses ~1 in 5 calls). ~3% of one CPU core each.
+    streams: 4
+    # Boost quiet speech up to this factor (1 = off). Loud speech is never changed.
+    max_gain: 8.0
+  openwakeword:
+    # Built-in name (hey_jarvis, alexa, hey_mycroft) or a custom .onnx path
+    model: hey_jarvis
+    threshold: 0.5
+
+audio:
+  sample_rate: 16000
+  # null = system default microphone. Run `python -m max_assistant --list-devices` to see options
+  input_device: null
+  output_device: null
+  # Stop recording after this much silence once you start talking
+  silence_s: 1.0
+  # Give up if you say nothing for this long after the wake word
+  no_speech_timeout_s: 5.0
+  max_record_s: 15.0
+  # Multiplier over measured background noise to count as speech
+  vad_sensitivity: 3.0
+  chime: true
+
+stt:
+  # tiny.en / base.en / small.en / medium.en. small.en is the sweet spot on CPU
+  model: small.en
+  device: cpu        # keep on CPU so the LLM gets all the VRAM
+  compute_type: int8
+
+tts:
+  engine: piper      # piper (natural, offline) or sapi (built-in Windows voice fallback)
+  piper_voice: models/piper/en_US-ryan-medium.onnx
+  speed: 1.0
+
+safety:
+  # Tools marked risky always need a spoken/typed "yes" first
+  confirm_risky: true
+  confirm_timeout_s: 8.0
+
+notes:
+  file: data/notes.md
+
+logging:
+  file: logs/max.log
+  level: INFO
+
+# Spoken name -> what to launch. Anything not listed is found via the Start Menu.
+apps:
+  notepad: notepad.exe
+  calculator: calc.exe
+  file explorer: explorer.exe
+  explorer: explorer.exe
+  command prompt: cmd.exe
+  terminal: wt.exe
+  powershell: powershell.exe
+  task manager: taskmgr.exe
+  settings: "ms-settings:"
+  paint: mspaint.exe
+  chrome: chrome
+  edge: msedge
+  vs code: code
+  vscode: code
+  visual studio code: code
+  spotify: "spotify:"
+  whatsapp: "whatsapp:"

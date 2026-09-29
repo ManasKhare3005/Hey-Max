@@ -1,0 +1,16 @@
+requests>=2.31
+PyYAML>=6.0
+numpy>=1.26
+sounddevice>=0.4.6
+openwakeword>=0.6.0
+sherpa-onnx>=1.12
+sentencepiece>=0.2
+onnxruntime>=1.17
+faster-whisper>=1.0.3
+piper-tts>=1.2.0
+pyttsx3>=2.90
+psutil>=5.9
+Pillow>=10.0
+
+# dev
+pytest
