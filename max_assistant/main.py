@@ -12,6 +12,8 @@ from .agent import Agent, parse_yes_no
 from .config import load_config, resolve_path
 from .llm import OllamaClient
 from .tools import system as system_tools
+from .tools import browser as browser_tools
+from .tools import web as web_tools
 from .tools.registry import ToolRegistry
 
 log = logging.getLogger("max")
@@ -27,6 +29,9 @@ class Context:
         self.llm = llm
         self.last_files: list[str] = []
         self.models_asleep = False
+        self.web = None   # WebSearch, set by tools.web
+        self.browser = None   # BrowserSession, set by tools.browser
+        self.confirm = lambda prompt: False   # spoken yes/no, set by build()
 
 
 def setup_logging(cfg, verbose: bool):
@@ -50,8 +55,11 @@ def build(cfg, confirm, on_event):
                        gpu_layers={cfg.llm.fast_model: cfg.llm.get("fast_model_gpu_layers")}
                        if cfg.llm.get("fast_model_gpu_layers") else None)
     ctx = Context(cfg, llm)
+    ctx.confirm = confirm
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
+    web_tools.register(registry)
+    browser_tools.register(registry)
     agent = Agent(
         llm, registry,
         fast_model=cfg.llm.fast_model,
@@ -77,6 +85,14 @@ def check_models(llm: OllamaClient, cfg) -> bool:
             print(f"⚠  Model {m} isn't downloaded. Run:  ollama pull {m}")
             ok = False
     return ok
+
+
+# Said while a slow tool runs, so there's no dead air (voice mode only)
+FILLERS = {
+    "web_search": "Let me look that up.",
+    "browser_read": "Reading the page.",
+    "__escalate__": "Let me think about that one.",
+}
 
 
 def event_printer(verbose: bool):
@@ -174,19 +190,37 @@ def run_voice(cfg, verbose: bool):
         return stt.transcribe(audio) if audio is not None else ""
 
     def confirm(prompt: str) -> bool:
-        speaker.say(prompt + " Say yes or no.")
+        say(prompt + " Say yes or no.")
         answer = listen(cfg.safety.confirm_timeout_s)
         print(f"   you: {answer or '(silence)'}")
         return parse_yes_no(answer)
 
-    ctx, llm, agent = build(cfg, confirm, event_printer(verbose))
+    speak_lock = threading.Lock()
+
+    def say(text: str):
+        with speak_lock:          # one voice at a time: a filler never overlaps the answer
+            speaker.say(text)
+
+    printer = event_printer(verbose)
+    turn = {"filler": False}
+
+    def on_event(kind, data):
+        printer(kind, data)
+        if kind == "thinking" and data.get("step") == 0:
+            turn["filler"] = False
+        key = data.get("tool") if kind == "tool_call" else "__escalate__" if kind == "escalate" else None
+        if key in FILLERS and not turn["filler"]:
+            turn["filler"] = True
+            threading.Thread(target=say, args=(FILLERS[key],), daemon=True).start()
+
+    ctx, llm, agent = build(cfg, confirm, on_event)
     models_ok = check_models(llm, cfg)
     if models_ok:
         threading.Thread(target=llm.preload, args=(cfg.llm.fast_model,), daemon=True).start()
 
     mic.start()
     print(f"\n✅ Ready. Say \"{wake.phrase}\". Press Ctrl+C to quit.\n")
-    speaker.say(f"{cfg.assistant.name} online.")
+    say(f"{cfg.assistant.name} online.")
 
     try:
         while True:
@@ -205,13 +239,13 @@ def run_voice(cfg, verbose: bool):
                     chime("done", a.output_device)
                 print("   (didn't catch anything)")
             elif text.lower().strip(" .!?") in CANCEL_PHRASES:
-                speaker.say("Okay.")
+                say("Okay.")
             else:
                 print(f"🗣  you: {text}")
                 ctx.models_asleep = False
                 answer = agent.handle(text)
                 print(f"🤖 {cfg.assistant.name.lower()}: {answer}\n")
-                speaker.say(answer)
+                say(answer)
             wake.reset()
             mic.flush()
     except KeyboardInterrupt:

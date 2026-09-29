@@ -4,7 +4,7 @@ assistant:
   name: Max
   user_name: Manas
   # How many tool-calling rounds the agent may take for one request
-  max_steps: 6
+  max_steps: 8
 
 llm:
   host: http://127.0.0.1:11434
@@ -54,6 +54,24 @@ wake_word:
     # Built-in name (hey_jarvis, alexa, hey_mycroft) or a custom .onnx path
     model: hey_jarvis
     threshold: 0.5
+
+web:
+  # Self-hosted SearXNG (docker compose up -d). Falls back to DuckDuckGo when it's not running.
+  searxng_url: http://127.0.0.1:8888
+  fallback_duckduckgo: true
+  results: 5
+  timeout_s: 8
+  # Read this many top pages for each search (more accurate, ~1-3 s slower). 0 = snippets only
+  read_pages: 4
+
+browser:
+  # Max's own Chrome window (separate profile; sign in to sites there once). Websites and
+  # Google searches open here so Max can click, type and read them.
+  enabled: true
+  profile_dir: data/browser-profile
+  # "chrome" = your installed Chrome; "chromium" = Playwright's own (run: playwright install chromium)
+  channel: chrome
+  headless: false
 
 audio:
   sample_rate: 16000

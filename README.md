@@ -2,7 +2,7 @@
 
 Say **"Hey Max"** and it listens, thinks with a local LLM, runs tools on your laptop and answers out loud. No cloud: wake word, speech recognition, the LLM and the voice all run on your machine.
 
-**Phase 1 of 6** — the voice loop and laptop control. Coming next: web research & browsing, memory + dashboard, Android app, Galaxy Watch app, Gmail/Calendar.
+**Phases 1–2 of 6** — the voice loop, laptop control, web research and browser control. Coming next: memory + dashboard, Android app, Galaxy Watch app, Gmail/Calendar.
 
 ## How it works
 
@@ -14,12 +14,13 @@ Say **"Hey Max"** and it listens, thinks with a local LLM, runs tools on your la
                                                                   │
                                                                   ▼
                         ┌──────────── Agent (plan → tool → check) ────────────┐
-                        │ fast model  qwen3:4b  (GPU, handles most commands)  │
+                        │ fast model  qwen3:4b-instruct (100% GPU, ~50 tok/s) │
                         │   └─ think_harder ─► qwen3:8b (GPU+CPU, on demand)  │
                         │ safety gate: risky tools need your spoken "yes"     │
                         └──────────────┬──────────────────────────────────────┘
                                        ▼
-                      tools: apps · files · media · volume · notes · power
+      tools: apps · files · media · volume · notes · power
+             web search (SearXNG, reads the top pages) · Max's own Chrome window
                                        │
                                        ▼
                                Piper voice (CPU) ──► speakers
@@ -32,7 +33,7 @@ Say **"Hey Max"** and it listens, thinks with a local LLM, runs tools on your la
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\setup.ps1
    ```
-   It installs Python 3.11 and Ollama if missing, creates a virtual environment, installs packages, and downloads the voice, wake word, Whisper model and both LLMs (~8 GB total).
+   It installs Python 3.11 and Ollama if missing, creates a virtual environment, installs packages, downloads the voice, wake word, Whisper model and both LLMs (~8 GB total), and starts the private search engine if Docker Desktop is running.
 
 ## Run it
 
@@ -56,10 +57,16 @@ Make sure the **Ollama app is running** (it starts with Windows after install).
 - "Take a screenshot" · "Lock my laptop"
 - "Close Chrome" → asks for confirmation first
 - "Go to sleep" → unloads the models to free your GPU for gaming
+- "Who won the most recent Super Bowl?" · "What's the weather in Tempe?" → searches and reads the top pages
+- "Search for cute dog pics" → "Show images instead" → "Open the first result" → "Go back"
+- "Open YouTube" → "Search for lofi music" → "Play the second video" → "Pause it"
+- "Open wikipedia.org/wiki/Golden_Retriever" → "How much do they weigh, according to this page?"
 
 ## Safety
 
 Tools are marked safe or risky in code. Risky ones (`close_app`, `power`) always ask **"…Say yes or no."** Only a clear yes runs them; silence or anything ambiguous counts as no. Shutdown/restart also wait 10 seconds and can be cancelled ("cancel shutdown").
+
+In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete and similar ask first, and so does pressing Enter anywhere except a search box. Max never types into password fields.
 
 ## Tuning (`config.yaml`)
 
@@ -70,6 +77,11 @@ Tools are marked safe or risky in code. Risky ones (`close_app`, `power`) always
 - **Different LLMs:** any Ollama model with tool support, e.g. `llama3.2:3b` or `qwen2.5:7b`. Pull it with `ollama pull <name>`.
 - **GPU memory:** `llm.keep_alive` sets how long a model stays loaded after use.
 - **Add app shortcuts:** add `spoken name: command` under `apps:`. Apps not listed are found automatically via the Start Menu.
+
+## Web search and browsing
+
+- **Search** runs on [SearXNG](https://github.com/searxng/searxng), a private meta-search engine, in Docker on `127.0.0.1:8888` (`docker compose up -d`). If Docker isn't running, Max falls back to DuckDuckGo. Each search also reads the top 4 pages and keeps the passages that match the question (with a preference for the newest year on "latest/most recent" questions), so answers come from the pages, not just snippets. Set `web.read_pages: 0` for snippet-only, faster searches.
+- **Browser**: websites and Google searches open in **Max's own Chrome window** (your installed Chrome, separate profile in `data/browser-profile`). Chrome won't let automation attach to your everyday profile, and a separate one keeps Max's logins apart: sign in to sites once in Max's window and it remembers. Max can click things by name ("Images", "Sign in"), by position ("the second video"), type into fields, scroll, go back, read the page and manage tabs.
 
 ## Wake word
 
@@ -108,9 +120,13 @@ max_assistant/
   wakeword.py    wake word engines (sherpa-onnx keyword spotting, openWakeWord)
   stt.py         faster-whisper
   tts.py         Piper / Windows voice
+  web.py         SearXNG/DuckDuckGo search, page reading, passage ranking
+  browser.py     Max's Chrome window (Playwright), element finding
   tools/
     registry.py  @tool decorator, schemas, risky flags
     system.py    laptop tools
+    web.py       web_search
+    browser.py   click / type / navigate / read / tabs
 tests/           pytest suite (runs without a mic, GPU or Ollama)
 ```
 

@@ -94,6 +94,26 @@ if (-not (Test-Path (Join-Path $kwsDir "tokens.txt"))) {
 & $venvPy -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')"
 Check "Downloading the Whisper model"
 
+# 4b. Private web search (SearXNG in Docker) -------------------------------------
+Step "Setting up private web search (SearXNG)"
+$envFile = Join-Path $PSScriptRoot "searxng\.env"
+if (-not (Test-Path $envFile)) {
+    $bytes = New-Object byte[] 32
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    "SEARXNG_SECRET=" + (($bytes | ForEach-Object { $_.ToString("x2") }) -join "") | Set-Content -Encoding ascii $envFile
+}
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0) {
+        docker compose up -d; Check "Starting SearXNG"
+        Info "Search ready at http://127.0.0.1:8888"
+    } else {
+        Warn "Docker Desktop isn't running. Start it, then run: docker compose up -d  (Max uses DuckDuckGo until then)"
+    }
+} else {
+    Warn "Docker not installed; Max will search with DuckDuckGo. Install Docker Desktop for private search."
+}
+
 # 5. Ollama ---------------------------------------------------------------------
 Step "Checking Ollama"
 function Find-Ollama {

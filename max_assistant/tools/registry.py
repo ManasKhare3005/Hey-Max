@@ -9,6 +9,14 @@ from typing import Any, Callable
 log = logging.getLogger(__name__)
 
 
+DECLINED = "The user declined, so this action was NOT performed."
+
+
+class ForLLM(str):
+    """A result the LLM must read and act on even though the tool is `direct`
+    (e.g. a list of page elements to choose from)."""
+
+
 @dataclass
 class Tool:
     name: str
@@ -95,4 +103,6 @@ class ToolRegistry:
         except Exception as exc:
             log.exception("tool %s failed", name)
             return f"Error running {name}: {exc}"
-        return "Done." if result is None else str(result)
+        if result is None:
+            return "Done."
+        return result if isinstance(result, str) else str(result)   # keeps ForLLM

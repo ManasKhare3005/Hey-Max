@@ -6,3 +6,5 @@ data/
 logs/
 .pytest_cache/
 CLAUDE.md
+searxng/.env
+searxng/uwsgi.ini

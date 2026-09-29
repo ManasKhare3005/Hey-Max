@@ -1,0 +1,16 @@
+# Minimal SearXNG config for Max; everything else uses SearXNG's defaults.
+use_default_settings: true
+
+general:
+  instance_name: "Max search"
+
+server:
+  # secret_key comes from the SEARXNG_SECRET environment variable (searxng/.env)
+  limiter: false          # single local user; no bot protection needed
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json                # Max reads results as JSON

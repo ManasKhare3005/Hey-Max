@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import difflib
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from ..config import resolve_path
 from .registry import ToolRegistry
+
+log = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -90,6 +93,26 @@ GOOGLE_SECTIONS = {
 }
 
 
+# "search for X on <site>": the site's own search page
+SITE_SEARCH = {
+    "youtube": "https://www.youtube.com/results?search_query={q}",
+    "amazon": "https://www.amazon.com/s?k={q}",
+    "wikipedia": "https://en.wikipedia.org/w/index.php?search={q}",
+    "reddit": "https://www.reddit.com/search/?q={q}",
+    "github": "https://github.com/search?q={q}",
+    "spotify": "https://open.spotify.com/search/{q}",
+    "ebay": "https://www.ebay.com/sch/i.html?_nkw={q}",
+}
+
+
+def site_search_url(site: str, query: str) -> str | None:
+    from urllib.parse import quote_plus
+
+    key = re.sub(r"(\.com|\.org)$", "", site.lower().strip())
+    template = SITE_SEARCH.get(key)
+    return template.format(q=quote_plus(query)) if template else None
+
+
 def google_url(query: str, section: str = "all") -> str:
     from urllib.parse import quote_plus
 
@@ -160,28 +183,47 @@ def register(reg: ToolRegistry):
         "'open the videos tab'), call again with the same search phrase and that section.",
         params={
             "target": {"type": "string",
-                       "description": "A domain like 'youtube.com', or the search phrase, e.g. 'cute dog pictures'"},
+                       "description": "A domain like 'youtube.com', or the search phrase using the user's "
+                                      "exact words and spelling, e.g. 'cute dog pictures'"},
             "section": {"type": "string", "enum": list(GOOGLE_SECTIONS),
                         "description": "Google tab. Leave as 'all' unless the user explicitly says "
                                        "images/pictures/photos, videos, news, shopping or maps."},
+            "site": {"type": "string", "enum": list(SITE_SEARCH),
+                     "description": "Search inside this site instead of Google, when the user says "
+                                    "'on YouTube', 'on Amazon', etc."},
         },
         required=["target"],
         direct=True,
     )
-    def open_website(target: str, section: str = "all"):
+    def open_website(target: str, section: str = "all", site: str = "", ctx=None):
+        def show(url: str):
+            # Max's own Chrome window when available, so later clicks/typing work on the page
+            browser = getattr(ctx, "browser", None)
+            if browser is not None:
+                try:
+                    browser.goto(url)
+                    return
+                except Exception as exc:
+                    log.warning("Max's browser failed (%s); using the default browser", exc)
+            webbrowser.open(url)
+
         t = target.strip()
         if re.match(r"^(https?://)?[\w-]+(\.[\w-]+)+(/\S*)?$", t):
-            webbrowser.open(t if t.startswith("http") else f"https://{t}")
+            show(t if t.startswith("http") else f"https://{t}")
             site = re.sub(r"^https?://(www\.)?", "", t).rstrip("/")
             return f"Opened {site}."   # spoken, so no "https colon slash slash"
+        if site and (url := site_search_url(site, t)):
+            show(url)
+            name = {"youtube": "YouTube", "github": "GitHub", "ebay": "eBay"}.get(site.lower(), site.title())
+            return f"Searching {name} for {t}."
         section = section if section in GOOGLE_SECTIONS else "all"
-        webbrowser.open(google_url(t, section))
+        show(google_url(t, section))
         if section == "all":
             return f"Searching Google for {t}."
         return f"Here are Google {section.title()} results for {t}."
 
     @reg.tool(
-        "Control media playback (Spotify, YouTube, etc.).",
+        "Media keys for music apps like Spotify: play/pause, next, previous, stop. For a video on a web page in Max's browser (YouTube etc.), use browser_media instead.",
         params={"action": {"type": "string", "enum": ["play_pause", "next", "previous", "stop"]}},
         direct=True,
     )

@@ -10,7 +10,7 @@ from max_assistant.config import Section, load_config
 from max_assistant.llm import ChatReply, ToolCall
 from max_assistant.main import Context
 from max_assistant.tools import system as system_tools
-from max_assistant.tools.registry import ToolRegistry
+from max_assistant.tools.registry import DECLINED, ToolRegistry
 from max_assistant.tools.system import best_match
 from max_assistant.tts import clean_for_speech
 
@@ -457,3 +457,185 @@ def test_llm_forces_gpu_layers_and_falls_back_on_load_error(monkeypatch):
     assert "num_gpu" not in sent[2]            # and stays off for the session
     client.chat("planner", [])
     assert "num_gpu" not in sent[3]            # never forced for other models
+
+
+# ---------- web ----------
+
+def test_select_passages_prefers_query_terms():
+    from max_assistant.web import select_passages
+
+    text = ("Paris is the capital of France. It has many museums. " * 3 +
+            "The Eiffel Tower is 330 metres tall including antennas. " +
+            "Bread is popular. " * 10)
+    picked = select_passages(text, "how tall is the Eiffel Tower", n=1, size=120)
+    assert len(picked) == 1 and "330 metres" in picked[0]
+
+
+def test_select_passages_recency_finds_last_table_rows():
+    from max_assistant.web import select_passages
+
+    rows = " ".join(f"| {1967 + i} | Team{i} won the Super Bowl |." for i in range(60))
+    picked = select_passages(rows, "most recent Super Bowl winner", n=1, size=200, this_year=2026)
+    assert "2026" in picked[0] and "Team59" in picked[0]
+    old = select_passages(rows, "first Super Bowl winner", n=1, size=200, this_year=2026)
+    assert "1967" in old[0]                      # no recency intent: earliest match wins
+
+
+def test_web_search_falls_back_to_duckduckgo(monkeypatch):
+    import requests
+
+    from max_assistant import web
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("docker is off")
+
+    monkeypatch.setattr(web.requests, "get", boom)
+    monkeypatch.setattr(web.WebSearch, "_duckduckgo",
+                        lambda self, q, n: [web.SearchResult("DDG hit", "https://example.com/a", "snippet")])
+    ws = web.WebSearch("http://127.0.0.1:8888")
+    hits = ws.search("anything")
+    assert [h.title for h in hits] == ["DDG hit"] and ws.last_backend == "duckduckgo"
+
+
+def test_web_search_tool_includes_passages_and_guard(tmp_path, monkeypatch):
+    from max_assistant import web
+    from max_assistant.tools import web as web_tools
+
+    monkeypatch.setattr(web.WebSearch, "search", lambda self, q, n=None: [
+        web.SearchResult("Super Bowl Winners", "https://www.espn.com/sb", "Every champion since 1967.")])
+    monkeypatch.setattr(web, "fetch_text", lambda url, timeout=5.0: "| 2025 | Philadelphia won |. | 2026 | Seattle won |.")
+    cfg = load_config()
+    reg = ToolRegistry(context=Context(cfg, FakeLLM([])))
+    web_tools.register(reg)
+    out = reg.run("web_search", {"query": "latest Super Bowl winner"})
+    assert "1. Super Bowl Winners (espn.com)" in out
+    assert "Seattle won" in out                  # passage read from the page
+    assert "don't guess" in out                  # anchored to the results
+
+
+# ---------- browser (fake page, no Chrome needed) ----------
+
+def el(i, name, role="link", **kw):
+    from max_assistant.browser import Element
+
+    base = dict(tag="a" if role == "link" else "button", type="", in_view=True, top=100 * i, heading=False,
+                search=False, left=0, image=False, main=True)
+    base.update(kw)
+    return Element(i, name, base.pop("tag"), base.pop("type"), role, **base)
+
+
+def test_pick_exact_ordinal_number_and_ambiguous():
+    from max_assistant.browser import pick
+
+    page = [el(1, "Images", role="tab", main=False), el(2, "Videos", role="tab", main=False),
+            el(3, "Cute puppies playing in the snow", heading=True), el(4, "Ten tiny dogs you will love", heading=True),
+            el(5, "Privacy", main=False)]
+    assert pick(page, "Images")[0].id == 1
+    assert pick(page, "first result")[0].id == 3            # nav tabs aren't results
+    assert pick(page, "second result")[0].id == 4
+    assert pick(page, "#5")[0].id == 5
+    chosen, candidates = pick(page, "zzz qqq")
+    assert chosen is None and candidates                    # nothing clear: let the LLM choose
+
+
+def test_pick_thumbnail_becomes_title_link():
+    from max_assistant.browser import pick
+
+    page = [el(1, "Sponsored thing you should buy today", top=50),
+            el(2, "11:53:45 Now playing", top=400, image=True),
+            el(3, "lofi hip hop radio - beats to relax/study to", top=402),
+            el(4, "6:10:58", top=700, image=True),
+            el(5, "Best of lofi hip hop 2021 - 6 hour mix", top=703)]
+    assert pick(page, "first video")[0].id == 3             # ad has no thumbnail; title beats "11:53:45"
+    assert pick(page, "second video")[0].id == 5
+
+
+class FakeSession:
+    running = True
+
+    def __init__(self, elements):
+        self.elements, self.clicked, self.typed = elements, [], []
+
+    def scan(self):
+        return self.elements
+
+    def settle(self, *a):
+        pass
+
+    def click(self, e):
+        self.clicked.append(e.id)
+
+    def type_into(self, e, text, submit):
+        self.typed.append((e.id if e else None, text, submit))
+
+
+def browser_registry(confirm_answer=False):
+    from max_assistant.tools import browser as browser_tools
+
+    cfg = load_config()
+    ctx = Context(cfg, FakeLLM([]))
+    asked = []
+    ctx.confirm = lambda p: asked.append(p) or confirm_answer
+    reg = ToolRegistry(context=ctx)
+    browser_tools.register(reg)              # picks up the FakeSession patched in by patch_session
+    return reg, ctx, asked
+
+
+def patch_session(monkeypatch, fake):
+    from max_assistant.tools import browser as browser_tools
+
+    monkeypatch.setattr(browser_tools, "BrowserSession", lambda *a, **k: fake)
+
+
+def test_browser_click_risky_needs_yes(tmp_path, monkeypatch):
+    fake = FakeSession([el(1, "Subscribe to Lofi Girl.", role="button"), el(2, "Share", role="button")])
+    patch_session(monkeypatch, fake)
+    reg, ctx, asked = browser_registry(confirm_answer=False)
+    assert reg.run("browser_click", {"target": "Share"}) == "Clicked Share."
+    assert reg.run("browser_click", {"target": "Subscribe"}) == DECLINED
+    assert asked == ["This will click 'Subscribe to Lofi Girl'. Should I?"]
+    assert fake.clicked == [2]
+
+
+def test_browser_type_search_submits_and_refuses_passwords(tmp_path, monkeypatch):
+    fake = FakeSession([el(1, "Search", role="searchbox", tag="input", search=True),
+                        el(2, "Password", role="textbox", tag="input", type="password"),
+                        el(3, "Comment", role="textbox", tag="textarea")])
+    patch_session(monkeypatch, fake)
+    reg, ctx, asked = browser_registry()
+    assert reg.run("browser_type", {"text": "lofi music"}) == "Typed it and submitted."
+    assert fake.typed == [(1, "lofi music", True)]           # search box: Enter by default
+    assert reg.run("browser_type", {"text": "hunter2", "field": "password"}).startswith("Error: I don't type passwords")
+    assert reg.run("browser_type", {"text": "great video", "field": "comment", "submit": True}) == DECLINED
+    assert len(fake.typed) == 1 and len(asked) == 1          # posting a comment needed a yes
+
+
+def test_ambiguous_click_goes_back_to_llm(tmp_path, monkeypatch):
+    fake = FakeSession([el(1, "Open settings panel", role="button"), el(2, "Open settings menu", role="button")])
+    patch_session(monkeypatch, fake)
+    reg, ctx, asked = browser_registry()
+    llm = FakeLLM([ChatReply("", [ToolCall("browser_click", {"target": "zzqq"})]),
+                   ChatReply("Which one: the settings panel or the settings menu?")])
+    agent = make_agent(reg, llm)
+    assert agent.handle("click that thing") == "Which one: the settings panel or the settings menu?"
+    assert len(llm.calls) == 2                               # list went to the LLM, not read aloud
+
+
+def test_pick_counts_videos_on_a_video_page():
+    from max_assistant.browser import pick
+
+    page = [el(1, "The Beatles", image=True, href="/channel/UCc4K7"),
+            el(2, "Hey Jude (Remastered 2015)", image=True, href="/watch?v=A_MjCqQoLLA"),
+            el(3, "Let It Be (Remastered 2009)", image=True, href="/watch?v=QDYfEBY9NM4"),
+            el(4, "Come Together", image=True, href="/watch?v=45cYwDMibGo")]
+    assert pick(page, "second link")[0].id == 3            # channel card isn't counted
+    assert pick(page, "first video")[0].id == 2
+
+
+def test_open_website_site_search(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(system_tools.webbrowser, "open", opened.append)
+    reg = make_registry(tmp_path)
+    assert reg.run("open_website", {"target": "Beatles", "site": "youtube"}) == "Searching YouTube for Beatles."
+    reg.run("open_website", {"target": "usb c hub", "site": "amazon.com"})
+    assert opened == ["https://www.youtube.com/results?search_query=Beatles", "https://www.amazon.com/s?k=usb+c+hub"]
