@@ -5,3 +5,4 @@ models/
 data/
 logs/
 .pytest_cache/
+CLAUDE.md
