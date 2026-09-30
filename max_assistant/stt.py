@@ -74,7 +74,8 @@ class SpeechToText:
             except Exception as exc:
                 log.warning("Moonshine unavailable (%s); using Whisper only", exc)
 
-    def whisper(self, audio: np.ndarray) -> str:
+    def whisper(self, audio: np.ndarray, prompt: str | None = None) -> str:
+        """`prompt` overrides the command vocabulary hint (notes pass the topic + recent text)."""
         segments, _ = self.model.transcribe(
             audio,
             language="en",
@@ -82,7 +83,7 @@ class SpeechToText:
             vad_filter=True,
             condition_on_previous_text=False,
             without_timestamps=True,
-            initial_prompt=self.prompt,
+            initial_prompt=prompt if prompt is not None else self.prompt,
         )
         return " ".join(s.text.strip() for s in segments).strip()
 

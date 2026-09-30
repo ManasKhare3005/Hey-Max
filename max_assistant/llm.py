@@ -43,14 +43,16 @@ class OllamaClient:
         # loading fails, e.g. when a game is holding VRAM.
         self.gpu_layers = dict(gpu_layers or {})
 
-    def chat(self, model: str, messages: list[dict], tools: list[dict] | None = None) -> ChatReply:
+    def chat(self, model: str, messages: list[dict], tools: list[dict] | None = None,
+             options: dict[str, Any] | None = None) -> ChatReply:
+        """`options` overrides per call, e.g. {"num_predict": 1000} for long notes."""
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
             "keep_alive": self.keep_alive,
             "think": self.think,
-            "options": self._options(model),
+            "options": {**self._options(model), **(options or {})},
         }
         if tools:
             payload["tools"] = tools

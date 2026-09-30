@@ -1,4 +1,4 @@
-import type { Fact, MaxState, Reminder } from "./types";
+import type { Fact, MaxState, NoteDetail, NoteItem, NotesStatus, Reminder } from "./types";
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -34,4 +34,10 @@ export const api = {
       body: JSON.stringify({ text, when }),
     }),
   cancelReminder: (id: number) => call<{ ok: boolean }>(`/api/reminders/${id}`, { method: "DELETE" }),
+  notesStatus: () => call<NotesStatus>("/api/notes/status"),
+  notesStart: (kind: string) => call<{ ok: boolean; title: string }>("/api/notes/start", { method: "POST", body: JSON.stringify({ kind }) }),
+  notesStop: () => call<{ ok: boolean }>("/api/notes/stop", { method: "POST" }),
+  notes: () => call<NoteItem[]>("/api/notes"),
+  note: (id: number) => call<NoteDetail>(`/api/notes/${id}`),
+  openNote: (id: number) => call<{ ok: boolean }>(`/api/notes/${id}/open`, { method: "POST" }),
 };

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import Conversation from "./components/Conversation";
-import Drawer from "./components/Drawer";
+import Drawer, { type Tab } from "./components/Drawer";
 import Hero from "./components/Hero";
 import { Activity, Approvals } from "./components/SidePanels";
 import TopBar from "./components/TopBar";
@@ -9,7 +9,7 @@ import { useMax } from "./useMax";
 
 export default function App() {
   const max = useMax();
-  const [drawer, setDrawer] = useState<"memory" | "reminders" | null>(null);
+  const [drawer, setDrawer] = useState<Tab | null>(null);
   const close = useCallback(() => setDrawer(null), []);
   const next = max.state.next_reminder;
   const hb = max.state.heartbeat || {};
@@ -38,6 +38,10 @@ export default function App() {
         <button className="bar-btn" onClick={() => setDrawer("memory")}>
           <span className="label">memory</span>
           <span className="bar-value">browse & edit ›</span>
+        </button>
+        <button className={`bar-btn ${max.recording ? "rec" : ""}`} onClick={() => setDrawer("notes")}>
+          <span className="label">notes</span>
+          <span className="bar-value">{max.recording ? `● recording ${max.recording}` : "meetings & lectures ›"}</span>
         </button>
         <div className="bar-spacer" />
         <div className="bar-btn static">

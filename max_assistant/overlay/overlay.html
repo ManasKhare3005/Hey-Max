@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Max overlay</title>
+<style>
+  :root {
+    --bg: rgba(8, 14, 26, 0.94);
+    --line: rgba(56, 189, 248, 0.22);
+    --line-strong: rgba(34, 211, 238, 0.45);
+    --text: #dbe7f3; --text-2: #93a9bf; --muted: #5d7489;
+    --cyan: #22d3ee; --teal: #2dd4bf; --violet: #a5b4fc; --amber: #fbbf24; --red: #f87171; --green: #34d399;
+    --mono: "Cascadia Mono", Consolas, monospace;
+    --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: transparent; overflow: hidden; font-family: var(--sans); color: var(--text); user-select: none; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+
+  .pill {
+    height: 56px; margin: 4px; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 10px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 999px;
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.05), 0 8px 26px -10px rgba(34, 211, 238, 0.55);
+  }
+  .grip { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; height: 100%; cursor: grab; }
+  .orb {
+    width: 30px; height: 30px; border-radius: 50%; flex: none; pointer-events: none;
+    background: radial-gradient(circle at 36% 32%, #effdff 0 12%, var(--c1) 38%, var(--c2) 100%);
+    box-shadow: 0 0 16px var(--glow);
+    --c1: #22d3ee; --c2: #0e4a5e; --glow: rgba(34, 211, 238, 0.7);
+    animation: breathe 3.2s ease-in-out infinite;
+  }
+  @keyframes breathe { 50% { transform: scale(0.9); filter: brightness(0.85); } }
+  .s-listening .orb { --c1: #5eead4; --c2: #0f766e; --glow: rgba(45, 212, 191, 0.9); animation: pulse 0.7s ease-in-out infinite; }
+  .s-thinking .orb, .s-transcribing .orb { --c1: #a5b4fc; --c2: #3730a3; --glow: rgba(129, 140, 248, 0.9); animation: spin 1.2s linear infinite; }
+  .s-speaking .orb { --c1: #67e8f9; --c2: #0e7490; --glow: rgba(103, 232, 249, 0.95); animation: pulse 0.45s ease-in-out infinite; }
+  .s-alert .orb { --c1: #fcd34d; --c2: #92400e; --glow: rgba(251, 191, 36, 0.95); animation: pulse 0.9s ease-in-out infinite; }
+  .s-paused .orb, .s-offline .orb { --c1: #64748b; --c2: #1e293b; --glow: rgba(100, 116, 139, 0.4); animation: none; }
+  .s-starting .orb { --c1: #22d3ee; --c2: #1e293b; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform: scale(1.14); } }
+  @keyframes spin { to { filter: hue-rotate(40deg); transform: rotate(360deg); } }
+
+  .who { min-width: 0; pointer-events: none; }
+  .name { font-weight: 700; letter-spacing: 0.26em; font-size: 12px; }
+  .stage { font-family: var(--mono); font-size: 11px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .btns { display: flex; gap: 4px; }
+  .btn {
+    width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+    background: rgba(34, 211, 238, 0.06); border: 1px solid transparent; color: var(--text-2); transition: 0.15s;
+  }
+  .btn svg { width: 17px; height: 17px; }
+  .btn:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); background: rgba(34, 211, 238, 0.14); }
+  .btn.active { border-color: var(--cyan); color: var(--cyan); background: rgba(34, 211, 238, 0.16); }
+  .btn:disabled { opacity: 0.3; cursor: default; }
+  .btn.mic { background: linear-gradient(135deg, rgba(34, 211, 238, 0.3), rgba(45, 212, 191, 0.22)); color: #e0fbff; }
+  .btn.mic.live { background: var(--teal); color: #04121a; box-shadow: 0 0 14px var(--teal); }
+  .btn.rec { color: #fca5a5; }
+  .btn.rec.on { background: var(--red); color: #fff; box-shadow: 0 0 14px var(--red); animation: recblink 1.4s ease-in-out infinite; }
+  @keyframes recblink { 50% { box-shadow: 0 0 4px var(--red); } }
+  .recbadge { color: var(--red); font-weight: 700; }
+  .choice { display: grid; gap: 8px; padding: 6px 2px; }
+  .choice button {
+    text-align: left; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(15, 28, 48, 0.8);
+  }
+  .choice button:hover { border-color: var(--line-strong); }
+  .choice b { display: block; font-size: 14px; margin-bottom: 2px; }
+  .choice span { font-size: 12px; color: var(--text-2); }
+  .note-sum { color: var(--text-2); font-size: 12.5px; margin-top: 4px; }
+  .btn.power.on { color: var(--green); }
+  .btn.power.off { color: var(--muted); }
+  .btn.power.arm { color: #fff; background: var(--red); box-shadow: 0 0 14px var(--red); }
+
+  .panel {
+    margin: 6px 4px 4px; height: 422px; display: flex; flex-direction: column;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+  }
+  .panel[hidden] { display: none; }
+  .head { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  .title { font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--cyan); }
+  .sub { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .list { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 7px; user-select: text; }
+  .row { padding: 9px 11px; border: 1px solid rgba(56, 189, 248, 0.12); border-radius: 10px; background: rgba(15, 28, 48, 0.7); font-size: 13px; line-height: 1.4; }
+  .row .meta { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; letter-spacing: 0.05em; }
+  .row .you { color: var(--teal); font-weight: 600; }
+  .row .max { color: var(--text); }
+  .row.due { border-left: 2px solid var(--amber); }
+  .row.class { border-left: 2px solid var(--violet); }
+  .row.rem { border-left: 2px solid var(--cyan); }
+  .section { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin: 6px 2px 0; }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px 6px; text-align: center; line-height: 1.5; }
+  a { color: var(--cyan); }
+  .foot { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  .link {
+    flex: 1; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--line); background: transparent;
+    font-size: 12px; color: var(--text-2);
+  }
+  .link:hover { border-color: var(--line-strong); color: var(--text); }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(34, 211, 238, 0.2); border-radius: 6px; }
+</style>
+</head>
+<body class="s-offline">
+  <div class="pill">
+    <div class="grip pywebview-drag-region" title="Drag to move">
+      <div class="orb"></div>
+      <div class="who">
+        <div class="name" id="name">MAX</div>
+        <div class="stage" id="stage">connecting…</div>
+      </div>
+    </div>
+    <div class="btns">
+      <button class="btn mic" id="listen" title="Listen now (push to talk)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      </button>
+      <button class="btn rec" id="rec" title="Record a lecture or meeting and take notes">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+      </button>
+      <button class="btn" data-panel="chats" title="Chats">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>
+      </button>
+      <button class="btn" data-panel="memory" title="Memories">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></svg>
+      </button>
+      <button class="btn" data-panel="today" title="Due today">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>
+      </button>
+      <button class="btn" data-panel="notes" title="Meeting & lecture notes">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></svg>
+      </button>
+      <button class="btn power off" id="power" title="Start Max">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="panel" id="panel" hidden>
+    <div class="head"><span class="title" id="ptitle"></span><span class="sub" id="psub"></span></div>
+    <div class="list" id="plist"></div>
+    <div class="foot">
+      <button class="link" id="pause">Pause listening</button>
+      <button class="link" id="dash">Open dashboard</button>
+      <button class="link" id="hide">Hide overlay</button>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let api = null, online = false, paused = false, open = null, armTimer = null, lastStage = "", rec = null;
+const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const time = (iso) => { const d = new Date(iso); return d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }); };
+
+function stageClass(st) {
+  if (!st.online) return st.starting ? "starting" : "offline";
+  if (st.approvals) return "alert";
+  const s = st.stage || "";
+  if (/paused/.test(s)) return "paused";
+  if (/listening/.test(s)) return "listening";
+  if (/transcrib/.test(s)) return "transcribing";
+  if (/thinking/.test(s)) return "thinking";
+  if (/speaking/.test(s)) return "speaking";
+  return "idle";
+}
+const LABEL = { offline: "off · press ⏻ to start", starting: "starting up…", idle: "standing by", paused: "paused (mic off)",
+  listening: "listening…", transcribing: "transcribing…", thinking: "thinking…", speaking: "speaking…", alert: "needs your approval" };
+
+async function tick() {
+  const st = await api.status();
+  online = st.online;
+  const cls = stageClass(st);
+  document.body.className = "s-" + cls;
+  paused = cls === "paused";
+  $("stage").textContent = LABEL[cls] + (cls === "idle" && st.next_reminder ? ` · ⏰ ${st.next_reminder.text}` : "");
+  if (st.name) $("name").textContent = st.name.toUpperCase();
+  $("listen").disabled = !online;
+  $("listen").classList.toggle("live", cls === "listening");
+  const p = $("power");
+  if (!p.classList.contains("arm")) {
+    p.className = "btn power " + (online ? "on" : "off");
+    p.title = online ? "Stop Max" : "Start Max";
+  }
+  rec = online ? await api.notes_status() : null;
+  const recording = !!(rec && rec.ok && rec.active);
+  $("rec").classList.toggle("on", recording);
+  $("rec").disabled = !online;
+  $("rec").title = recording ? "Stop recording and write up the notes" : "Record a lecture or meeting and take notes";
+  if (recording) $("stage").innerHTML = `<span class="recbadge">● REC ${mmss(rec.elapsed_s)}</span> · ${esc(rec.kind)} · ${rec.words} words`;
+  else if (rec && rec.ok && rec.finishing) $("stage").textContent = "writing up notes…";
+  $("pause").textContent = paused ? "Resume listening" : "Pause listening";
+  $("pause").disabled = !online;
+  if (open === "chats" && cls === "idle" && lastStage !== "idle") load("chats");   // new exchange finished
+  lastStage = cls;
+}
+
+async function load(which) {
+  const list = $("plist");
+  const titles = { chats: "recent chats", memory: "memories", today: "due today", notes: "meeting & lecture notes", record: "take notes" };
+  $("ptitle").textContent = titles[which];
+  $("psub").textContent = "";
+  if (!online) { list.innerHTML = `<div class="empty">Max is off.<br/>Press ⏻ to start it, then this fills in.</div>`; return; }
+  list.innerHTML = `<div class="empty">Loading…</div>`;
+  if (which === "chats") {
+    const r = await api.turns();
+    if (!r.ok) return fail(r);
+    $("psub").textContent = `${r.items.length} exchanges`;
+    list.innerHTML = r.items.length ? r.items.slice().reverse().map((t) =>
+      `<div class="row"><div><span class="you">you</span> ${esc(t.user)}</div><div class="max">${esc(t.reply)}</div>
+       <div class="meta">${time(t.ts)}${t.tools.length ? " · ⚙ " + esc(t.tools.join(", ")) : ""}</div></div>`).join("")
+      : `<div class="empty">No conversations yet. Say “Hey Max” or press the mic.</div>`;
+  } else if (which === "record") {
+    list.innerHTML = `<div class="choice">
+      <button data-kind="lecture"><b>Lecture / in person</b><span>Listens through the mic</span></button>
+      <button data-kind="meeting"><b>Meeting on this laptop</b><span>Zoom, Teams, a video: laptop audio + your mic</span></button>
+      <div class="empty">Max transcribes as it goes and writes notes when you stop. No audio is saved.<br/>Make sure recording is OK with the people present.</div></div>`;
+    list.querySelectorAll("[data-kind]").forEach((b) => b.onclick = async () => {
+      const r = await api.notes_start(b.dataset.kind);
+      if (r.ok === false) return fail(r);
+      toggle("record"); tick();
+    });
+  } else if (which === "notes") {
+    const r = await api.notes_list();
+    if (!r.ok) return fail(r);
+    $("psub").textContent = `${r.items.length} saved`;
+    list.innerHTML = r.items.length ? r.items.map((n) =>
+      `<div class="row"><div>${esc(n.title)}</div><div class="note-sum">${esc(n.summary).slice(0, 220)}</div>
+       <div class="meta">${time(n.started)} · ${esc(n.kind)} · ${n.words} words · <a href="#" data-open="${n.id}">open folder</a></div></div>`).join("")
+      : `<div class="empty">No notes yet. Press ⏺ during a lecture or meeting.</div>`;
+    list.querySelectorAll("a[data-open]").forEach((a) => a.onclick = (e) => { e.preventDefault(); api.notes_open(+a.dataset.open); });
+  } else if (which === "memory") {
+    const r = await api.facts();
+    if (!r.ok) return fail(r);
+    $("psub").textContent = `${r.items.length} saved`;
+    list.innerHTML = r.items.length ? r.items.map((f) =>
+      `<div class="row">${esc(f.text)}<div class="meta">saved ${new Date(f.created).toLocaleDateString()}</div></div>`).join("")
+      : `<div class="empty">Nothing saved yet. Try “Hey Max, remember that …”.</div>`;
+  } else {
+    const r = await api.today();
+    if (!r.ok) return fail(r);
+    $("psub").textContent = new Date(r.date + "T12:00").toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+    const sec = (title, items, cls, fmt) => items.length ? `<div class="section">${title}</div>` + items.map((i) => `<div class="row ${cls}">${fmt(i)}</div>`).join("") : "";
+    const html =
+      sec("due today", r.due_today, "due", (i) => `${esc(i.title)}<div class="meta">${esc(i.course)} · ${esc(i.when)}</div>`) +
+      sec("classes", r.classes, "class", (i) => `${esc(i.course)} ${esc(i.title)}<div class="meta">${esc(i.when)}${i.link && i.link.includes("zoom") ? ` · <a href="#" data-url="${esc(i.link)}">join zoom</a>` : ""}</div>`) +
+      sec("reminders", r.reminders, "rem", (i) => `${esc(i.text)}<div class="meta">${time(i.due)}</div>`) +
+      sec("coming up", r.due_soon, "due", (i) => `${esc(i.title)}<div class="meta">${esc(i.course)} · ${new Date(i.due).toLocaleDateString([], { weekday: "short" })} ${esc(i.when)}</div>`);
+    list.innerHTML = html || `<div class="empty">Nothing due, no classes and no reminders today. 🎉</div>`;
+    if (r.canvas_error) list.insertAdjacentHTML("beforeend", `<div class="empty">Canvas couldn't be reached right now.</div>`);
+    list.querySelectorAll("a[data-url]").forEach((a) => a.onclick = (e) => { e.preventDefault(); window.open(a.dataset.url); });
+  }
+}
+function fail(r) { $("plist").innerHTML = `<div class="empty">Couldn't load: ${esc(r.error)}</div>`; }
+
+function toggle(which) {
+  document.querySelectorAll("[data-panel]").forEach((b) => b.classList.toggle("active", b.dataset.panel === which && open !== which));
+  if (open === which) { open = null; $("panel").hidden = true; api.expand(false); return; }
+  open = which;
+  api.expand(true);
+  $("panel").hidden = false;
+  load(which);
+}
+
+window.addEventListener("pywebviewready", () => {
+  api = window.pywebview.api;
+  document.querySelectorAll("[data-panel]").forEach((b) => b.onclick = () => toggle(b.dataset.panel));
+  $("listen").onclick = () => api.listen();
+  $("rec").onclick = async () => {
+    if (rec && rec.ok && rec.active) { await api.notes_stop(); tick(); if (open !== "notes") toggle("notes"); }
+    else toggle("record");
+  };
+  $("power").onclick = async () => {
+    const p = $("power");
+    if (!online) { await api.start(); tick(); return; }
+    if (!p.classList.contains("arm")) {            // two-step stop so a stray click doesn't quit Max
+      p.className = "btn power arm"; p.title = "Click again to stop Max";
+      armTimer = setTimeout(() => { p.className = "btn power on"; p.title = "Stop Max"; }, 3000);
+      return;
+    }
+    clearTimeout(armTimer);
+    p.className = "btn power off";
+    await api.stop();
+  };
+  $("pause").onclick = () => api.pause(!paused).then(tick);
+  $("dash").onclick = () => api.open_dashboard();
+  $("hide").onclick = () => api.close_overlay();
+  tick();
+  setInterval(tick, 900);
+});
+</script>
+</body>
+</html>

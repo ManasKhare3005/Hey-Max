@@ -103,3 +103,12 @@ class ApprovalBroker:
     def pending(self) -> list[dict]:
         with self._lock:
             return [{"id": a.id, "prompt": a.prompt, "tool": a.tool} for a in self._pending.values()]
+
+
+@dataclass
+class Controls:
+    """Switches the voice loop checks between audio frames, set from the tray icon, the
+    desktop overlay or the API: pause the mic, quit, or listen right now (push-to-talk)."""
+    paused: threading.Event = field(default_factory=threading.Event)
+    quit: threading.Event = field(default_factory=threading.Event)
+    listen_now: threading.Event = field(default_factory=threading.Event)

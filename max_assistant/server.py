@@ -34,6 +34,7 @@ class Runtime:
     approvals: ApprovalBroker
     run_command: Callable[[str], str]           # typed command -> reply (serialised with voice)
     info: dict = field(default_factory=dict)    # static facts: name, wake phrase, models...
+    controls: Any = None                        # events.Controls (voice mode only)
 
 
 class Text(BaseModel):
@@ -47,6 +48,11 @@ class NewReminder(BaseModel):
 
 class Answer(BaseModel):
     approved: bool
+
+
+class NotesStart(BaseModel):
+    kind: str = "lecture"
+    title: str = ""
 
 
 class _Cached:
@@ -144,6 +150,94 @@ def create_app(rt: Runtime) -> FastAPI:
     def approve(approval_id: int, body: Answer):
         if not rt.approvals.answer(approval_id, body.approved):
             raise HTTPException(404, "no such pending approval")
+        return {"ok": True}
+
+    # ----- remote control (desktop overlay, later the phone) -----
+    @app.post("/api/control/{action}")
+    def control(action: str):
+        c = rt.controls
+        if c is None:
+            raise HTTPException(409, "remote control needs voice mode")
+        if action == "listen":
+            c.paused.clear()
+            c.listen_now.set()
+        elif action == "pause":
+            c.paused.set()
+        elif action == "resume":
+            c.paused.clear()
+        elif action == "quit":
+            c.quit.set()
+        else:
+            raise HTTPException(404, f"unknown action {action}")
+        rt.bus.publish("control", {"action": action})
+        return {"ok": True, "paused": c.paused.is_set()}
+
+    @app.get("/api/today")
+    def today():
+        from .digest import gather
+
+        plan = gather(rt.ctx)
+        item = lambda i: {"title": i.title, "course": i.course, "when": i.when, "due": i.start.isoformat(),
+                          "link": i.link or i.url}
+        return {
+            "date": plan.day.isoformat(),
+            "due_today": [item(i) for i in plan.due_today],
+            "due_soon": [item(i) for i in plan.due_soon],
+            "classes": [item(i) for i in plan.classes],
+            "reminders": [{"id": r.id, "text": r.text, "due": r.due.isoformat()} for r in plan.reminders],
+            "canvas_error": plan.canvas_error,
+            "paused": bool(rt.controls and rt.controls.paused.is_set()),
+        }
+
+    # ----- meeting / lecture notes -----
+    def notes_mgr():
+        if rt.ctx.notes is None:
+            raise HTTPException(503, "notes are disabled")
+        return rt.ctx.notes
+
+    @app.get("/api/notes/status")
+    def notes_status():
+        return notes_mgr().status()
+
+    @app.post("/api/notes/start")
+    def notes_start(body: NotesStart):
+        try:
+            s = notes_mgr().start(body.kind, body.title)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return {"ok": True, "title": s.title, "kind": s.kind}
+
+    @app.post("/api/notes/stop")
+    def notes_stop():
+        try:
+            notes_mgr().stop()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return {"ok": True}
+
+    @app.get("/api/notes")
+    def notes_list():
+        return rt.ctx.memory.notes(50) if rt.ctx.memory else []
+
+    @app.get("/api/notes/{note_id}")
+    def notes_get(note_id: int):
+        from pathlib import Path
+
+        n = rt.ctx.memory.note(note_id) if rt.ctx.memory else None
+        if n is None:
+            raise HTTPException(404, "no such notes")
+        folder = Path(n["folder"])
+        read = lambda name: (folder / name).read_text(encoding="utf-8") if (folder / name).exists() else ""
+        return {**n, "notes_md": read("notes.md"), "transcript_md": read("transcript.md")}
+
+    @app.post("/api/notes/{note_id}/open")
+    def notes_open(note_id: int):
+        import os
+
+        n = rt.ctx.memory.note(note_id) if rt.ctx.memory else None
+        if n is None:
+            raise HTTPException(404, "no such notes")
+        os.startfile(n["folder"])                      # opens the folder in Explorer
         return {"ok": True}
 
     # ----- history -----

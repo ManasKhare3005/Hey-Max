@@ -6,7 +6,6 @@ e.g. before gaming), quit. The voice loop reads `paused` and `quit` between audi
 from __future__ import annotations
 
 import logging
-import threading
 import webbrowser
 from typing import Callable
 
@@ -29,12 +28,15 @@ def _icon_image(paused: bool = False):
 
 
 class Tray:
-    def __init__(self, name: str, dashboard_url: str, free_gpu: Callable[[], None]):
+    def __init__(self, name: str, dashboard_url: str, free_gpu: Callable[[], None], controls=None):
+        from .events import Controls
+
         self.name = name
         self.url = dashboard_url
         self.free_gpu = free_gpu
-        self.paused = threading.Event()
-        self.quit = threading.Event()
+        self.controls = controls or Controls()
+        self.paused = self.controls.paused          # shared with the overlay and the API
+        self.quit = self.controls.quit
         self.icon = None
 
     def start(self):

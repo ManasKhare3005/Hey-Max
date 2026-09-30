@@ -47,3 +47,11 @@ export type MaxState = {
 };
 
 export type OrbMode = "idle" | "listening" | "transcribing" | "thinking" | "speaking" | "alert" | "offline";
+
+export type NoteItem = {
+  id: number; title: string; kind: string; started: string; ended: string; folder: string; summary: string; words: number;
+};
+export type NoteDetail = NoteItem & { notes_md: string; transcript_md: string };
+export type NotesStatus = {
+  active: boolean; finishing: boolean; title?: string; kind?: string; elapsed_s?: number; words?: number; last?: string;
+};

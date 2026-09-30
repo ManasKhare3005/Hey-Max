@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE TABLE IF NOT EXISTS actions (
     id INTEGER PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, started TEXT NOT NULL, ended TEXT NOT NULL,
+    folder TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', words INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY, text TEXT NOT NULL, due TEXT NOT NULL, created TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending', fired TEXT);
@@ -207,6 +210,24 @@ class MemoryStore:
             rows = self.db.execute("SELECT id, ts, kind, detail FROM actions ORDER BY id DESC LIMIT ?",
                                    (limit,)).fetchall()
             return [dict(r, detail=json.loads(r["detail"])) for r in reversed(rows)]
+
+    # ----- meeting / lecture notes -----
+    def add_notes(self, title: str, kind: str, started: str, ended: str, folder: str, summary: str, words: int) -> int:
+        with self.lock:
+            cur = self.db.execute("INSERT INTO notes (title, kind, started, ended, folder, summary, words) "
+                                  "VALUES (?, ?, ?, ?, ?, ?, ?)", (title, kind, started, ended, folder, summary, words))
+            self.db.commit()
+            return cur.lastrowid
+
+    def notes(self, limit: int = 50) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM notes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def note(self, note_id: int) -> dict | None:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+            return dict(row) if row else None
 
     # ----- small key/value state (e.g. when the daily digest was last sent) -----
     def get(self, key: str, default: str | None = None) -> str | None:

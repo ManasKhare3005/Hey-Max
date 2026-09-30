@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Fact, Reminder } from "../types";
 import { relative, whenLabel } from "../format";
+import NotesTab from "./NotesTab";
 
-type Tab = "memory" | "reminders";
+export type Tab = "memory" | "reminders" | "notes";
 type Props = { open: Tab | null; onClose: () => void; onTab: (t: Tab) => void; revision: number };
 
 export default function Drawer({ open, onClose, onTab, revision }: Props) {
@@ -21,11 +22,13 @@ export default function Drawer({ open, onClose, onTab, revision }: Props) {
           <div className="tabs">
             <button className={open === "memory" ? "active" : ""} onClick={() => onTab("memory")}>✦ Memory</button>
             <button className={open === "reminders" ? "active" : ""} onClick={() => onTab("reminders")}>⏰ Reminders</button>
+            <button className={open === "notes" ? "active" : ""} onClick={() => onTab("notes")}>✍ Notes</button>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
         </div>
         {open === "memory" && <MemoryTab revision={revision} />}
         {open === "reminders" && <RemindersTab revision={revision} />}
+        {open === "notes" && <NotesTab revision={revision} />}
       </aside>
     </>
   );

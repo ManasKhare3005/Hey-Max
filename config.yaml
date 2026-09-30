@@ -88,6 +88,15 @@ digest:
   # If the laptop was off at `time`, send when Max starts, but not after this
   catch_up_until: "18:00"
 
+notes:
+  # Meeting / lecture notes: "Hey Max, take notes" (lecture: mic) or "take meeting notes"
+  # (meeting: laptop audio + mic). Only the transcript and notes are kept, never audio.
+  enabled: true
+  folder: ~/Documents/Max Notes
+  # In meetings, also record your own voice from the mic (turn off if you use laptop
+  # speakers and hear an echo in transcripts)
+  include_mic_in_meetings: true
+
 dashboard:
   # Live dashboard + API (the phone/watch apps will use the same API in Phase 4)
   enabled: true

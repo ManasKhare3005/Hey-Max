@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import queue
 import sys
 import threading
+from pathlib import Path
 import time
 from logging.handlers import RotatingFileHandler
 
@@ -16,6 +18,7 @@ from .tools import system as system_tools
 from .tools import browser as browser_tools
 from .tools import canvas as canvas_tools
 from .tools import digest as digest_tools
+from .tools import notes as notes_tools
 from .tools import memory as memory_tools
 from .tools import web as web_tools
 from .tools.registry import ToolRegistry
@@ -70,6 +73,8 @@ class Context:
         self.memory = None    # MemoryStore (facts, conversation log, actions)
         self.reminders = None
         self.canvas = None     # CanvasFeed, when secrets.yaml has the feed link
+        self.notes = None      # NotesManager (meeting / lecture notes)
+        self.stt = None        # SpeechToText, shared with notes (voice mode creates it)
         self.confirm = lambda prompt: False   # spoken yes/no, set by build()
 
 
@@ -109,6 +114,20 @@ def build(cfg, confirm, on_event, bus=None):
         def on_event(kind, data, inner=inner):
             bus.publish(kind, data)
             inner(kind, data)
+    notes_cfg = cfg.get("notes", {}) or {}
+    if notes_cfg.get("enabled", True):
+        from .notes import NotesManager
+
+        def transcriber():
+            if ctx.stt is None:                        # text mode: load Whisper on first use
+                from .stt import SpeechToText
+
+                ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type)
+            return ctx.stt.whisper
+
+        folder = Path(os.path.expanduser(notes_cfg.get("folder", "~/Documents/Max Notes")))
+        ctx.notes = NotesManager(ctx, transcriber, folder, on_event=on_event,
+                                 include_mic_in_meetings=notes_cfg.get("include_mic_in_meetings", True))
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
     web_tools.register(registry)
@@ -116,6 +135,7 @@ def build(cfg, confirm, on_event, bus=None):
     memory_tools.register(registry)
     canvas_tools.register(registry)
     digest_tools.register(registry)
+    notes_tools.register(registry)
     agent = Agent(
         llm, registry,
         fast_model=cfg.llm.fast_model,
@@ -212,7 +232,7 @@ def event_printer(verbose: bool):
     return on_event
 
 
-def start_dashboard(cfg, ctx, bus, approvals, run_command, info):
+def start_dashboard(cfg, ctx, bus, approvals, run_command, info, controls=None):
     d = cfg.get("dashboard", {}) or {}
     if not d.get("enabled", True):
         return None
@@ -220,7 +240,7 @@ def start_dashboard(cfg, ctx, bus, approvals, run_command, info):
         from .server import Runtime, serve
 
         host, port = d.get("host", "127.0.0.1"), int(d.get("port", 8765))
-        server = serve(Runtime(ctx, bus, approvals, run_command, info), host, port)
+        server = serve(Runtime(ctx, bus, approvals, run_command, info, controls), host, port)
         print(f"🖥  Dashboard: http://{host}:{port}")
         return server
     except Exception as exc:                   # the assistant works without it
@@ -405,7 +425,19 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
             threading.Thread(target=say, args=(FILLERS[key],), daemon=True).start()
 
     ctx, llm, agent = build(cfg, confirm, on_event, bus=bus)
+    ctx.stt = stt
     announcements: queue.Queue[str] = queue.Queue()   # spoken reminders wait until Max is idle
+    if ctx.notes is not None:
+        def notes_done(result, error):
+            from .reminders import toast
+
+            if error:
+                announcements.put("Sorry, writing up the notes failed. The transcript may still be saved.")
+                return
+            announcements.put(f"Your notes for {result.title} are ready.")
+            toast("Max: notes ready", f"{result.title}: saved to {result.folder}")
+
+        ctx.notes.on_done = notes_done
 
     def run_command(text: str) -> str:
         with agent_lock:
@@ -451,7 +483,10 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         log.info("background listening: %s", ", ".join(tweaks))
     scheduler = start_reminders(ctx, lambda text: (bus.publish("reminder", {"action": "fired", "text": text}),
                                                    announcements.put(text)))
-    start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"))
+    from .events import Controls
+
+    controls = Controls()
+    start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"), controls)
     digest = start_digest(ctx, bus)
     mic.start()
     beat.start()
@@ -469,38 +504,42 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
             bus.publish("status", {"models": "asleep"})
 
         tray_icon = Tray(cfg.assistant.name, f"http://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}",
-                         sleep_models).start()
+                         sleep_models, controls).start()
     say_main(f"{cfg.assistant.name} online.")
 
     try:
         beat.set("waiting for wake word")
         while True:
-            if tray_icon is not None:
-                if tray_icon.quit.is_set():
-                    break
-                if tray_icon.paused.is_set():         # paused from the tray: ignore the mic
+            if controls.quit.is_set():               # tray, overlay or API asked Max to stop
+                break
+            manual = controls.listen_now.is_set()    # push-to-talk from the overlay/dashboard
+            if manual:
+                controls.listen_now.clear()
+                mic.flush()                          # start fresh: only what's said after the click
+            else:
+                if controls.paused.is_set():         # paused: ignore the mic
                     if beat.stage != "paused":
                         beat.set("paused")
-                    mic.read(timeout=0.5)
+                    mic.read(timeout=0.3)
                     continue
                 if beat.stage == "paused":
                     beat.set("waiting for wake word")
-            if not announcements.empty():
-                text = announcements.get()
-                print(f"⏰ {text}")
-                say_main(text)
-                wake.reset()
-                beat.set("waiting for wake word")
-            frame = mic.read(timeout=1.0)
-            if frame is None:
-                continue
-            if not wake.process(frame):
-                if rms(frame) < noise.level * 2:
-                    noise.update(frame)  # learn the room's background noise while idle
-                continue
+                if not announcements.empty():
+                    text = announcements.get()
+                    print(f"⏰ {text}")
+                    say_main(text)
+                    wake.reset()
+                    beat.set("waiting for wake word")
+                frame = mic.read(timeout=0.3)
+                if frame is None:
+                    continue
+                if not wake.process(frame):
+                    if rms(frame) < noise.level * 2:
+                        noise.update(frame)  # learn the room's background noise while idle
+                    continue
 
             log.info("front window at wake: %s", foreground_window())
-            bus.publish("wake", {"phrase": wake.phrase})
+            bus.publish("wake", {"phrase": wake.phrase, "manual": manual})
             print("👂 Listening...")
             converse(listen(a.no_speech_timeout_s), respond, listen_follow_up,
                      follow_up=a.get("follow_up", True),
@@ -511,6 +550,9 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
+        bus.publish("stage", {"stage": "stopped"})
+        if tray_icon is not None and tray_icon.icon is not None:
+            tray_icon.icon.stop()
         beat.stop()
         if scheduler:
             scheduler.stop()

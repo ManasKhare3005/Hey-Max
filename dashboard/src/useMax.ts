@@ -4,7 +4,7 @@ import type { Approval, MaxEvent, MaxState, Message, OrbMode, ToolUse } from "./
 
 const ACTIVITY_KINDS = new Set([
   "wake", "heard", "tool_call", "tool_result", "escalate", "approval_request", "approval_result",
-  "reminder", "memory", "answer",
+  "reminder", "memory", "answer", "notes",
 ]);
 
 /** Live connection to the running Max process: WebSocket events + periodic /api/state. */
@@ -16,7 +16,8 @@ export function useMax() {
   const [activity, setActivity] = useState<MaxEvent[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [lastWake, setLastWake] = useState(0);
-  const [revision, setRevision] = useState(0); // bumps when memory/reminders change
+  const [revision, setRevision] = useState(0); // bumps when memory/reminders/notes change
+  const [recording, setRecording] = useState(""); // kind of the notes recording in progress, or ""
   const level = useRef(0); // 0..1 mic level for the orb (no re-render per frame)
   const pendingTools = useRef<ToolUse[]>([]);
 
@@ -59,6 +60,10 @@ export function useMax() {
         break;
       case "reminder":
       case "memory":
+        setRevision((r) => r + 1);
+        break;
+      case "notes":
+        setRecording(d.action === "started" ? d.kind || "notes" : "");
         setRevision((r) => r + 1);
         break;
     }
@@ -153,5 +158,5 @@ export function useMax() {
               ? "speaking"
               : "idle";
 
-  return { connected, state, stage, messages, activity, approvals, level, lastWake, revision, orbMode, setMessages };
+  return { connected, state, stage, messages, activity, approvals, level, lastWake, revision, orbMode, setMessages, recording };
 }

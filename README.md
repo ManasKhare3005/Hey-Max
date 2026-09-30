@@ -95,7 +95,30 @@ In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete a
 
 ## Always on
 
-`powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1` makes Max start at login in the background (no console window) with a tray icon: open dashboard, pause listening, sleep models (free the GPU), quit. It restarts itself if it crashes; `-Uninstall` removes it. Starting Max a second time just opens the dashboard.
+`powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1` makes Max (and the desktop overlay) start at login in the background (no console window) with a tray icon: open dashboard, pause listening, sleep models (free the GPU), quit. It restarts itself if it crashes; `-Uninstall` removes it. Starting Max a second time just opens the dashboard.
+
+## Meeting & lecture notes
+
+"Hey Max, **take notes**" (lecture: listens through the mic) or "take notes on my Zoom call" (meeting: records the laptop's audio plus your mic), or press ⏺ on the overlay / use the dashboard's Notes tab. "**Stop taking notes**" when it's over.
+
+- Transcribes as it goes (Whisper, chunks cut at pauses, with the topic and recent sentences as a vocabulary hint), so stopping doesn't mean waiting an hour.
+- Notes are written in sections (the local model reads ~4k tokens at a time) and combined into **Summary, Key points, Details, Action items & deadlines, Open questions**.
+- A **"Deadlines & dates (exact quotes)"** section is added straight from the transcript, since the model can garble a time.
+- Saved to `Documents\Max Notes\<date> <title>\` as `notes.md` + `transcript.md`; no audio is kept. "What were the key points of today's lecture?" answers from them.
+- Recording other people can require their consent (ASU generally requires the instructor's permission to record lectures).
+
+## Desktop overlay
+
+A small always-on-top pill you can drag anywhere on screen (`overlay.bat`, or installed at login by `install_autostart.ps1`):
+
+- **status orb**: standing by, listening, thinking, speaking, needs approval, paused or off
+- **🎤 listen now**: push-to-talk, same as saying the wake word
+- **⏺ record**: take notes on a lecture or meeting (the pill shows ● REC and the time)
+- **💬 chats / ✦ memories / ✓ due today / 📄 notes**: open a panel with recent conversations, saved facts, or today's Canvas items, classes (with Zoom links) and reminders
+- **⏻ start / stop**: starts Max when it's off; stopping needs a second click so a stray click can't quit it
+- panel footer: pause listening, open the full dashboard, hide the overlay
+
+It's a separate lightweight process (pywebview on Windows' built-in Edge WebView) talking to Max's local API, so it keeps working while Max is stopped.
 
 ## Dashboard
 

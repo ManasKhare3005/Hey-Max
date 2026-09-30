@@ -39,7 +39,7 @@ export function Approvals({ approvals }: { approvals: Approval[] }) {
 
 const ICONS: Record<string, string> = {
   wake: "◉", heard: "›", tool_call: "⚙", tool_result: "✓", escalate: "⇪", answer: "◆",
-  approval_request: "⚠", approval_result: "⚖", reminder: "⏰", memory: "✦",
+  approval_request: "⚠", approval_result: "⚖", reminder: "⏰", memory: "✦", notes: "✍",
 };
 
 function describe(e: MaxEvent): { text: string; tone?: string } | null {
@@ -55,6 +55,8 @@ function describe(e: MaxEvent): { text: string; tone?: string } | null {
     case "approval_result": return { text: `${d.approved ? "approved" : "denied"} by ${d.by}`, tone: d.approved ? "green" : "red" };
     case "reminder": return { text: d.action === "fired" ? d.text : `reminder ${d.action}${d.text ? `: ${d.text}` : ""}`, tone: "amber" };
     case "memory": return { text: `memory ${d.action}${d.text ? `: ${d.text}` : ""}`, tone: "cyan" };
+    case "notes": return { text: d.action === "saved" ? `notes saved: ${d.title}` : `notes ${d.action}${d.title ? `: ${d.title}` : ""}`,
+                           tone: d.action === "failed" ? "red" : d.action === "started" ? "amber" : "cyan" };
   }
   return null;
 }

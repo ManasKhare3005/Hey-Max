@@ -1114,3 +1114,125 @@ def test_digest_refuses_placeholder_email_settings():
 
     with pytest.raises(RuntimeError, match="isn't set up"):
         send_email({"smtp_user": "your.address@gmail.com", "app_password": "xxxx xxxx xxxx xxxx"}, "s", "t", "<p>h</p>")
+
+
+def test_api_remote_control_and_today():
+    from fastapi.testclient import TestClient
+
+    from max_assistant.events import ApprovalBroker, Controls, EventBus
+    from max_assistant.server import Runtime, create_app
+
+    ctx = digest_ctx()
+    bus = EventBus()
+    controls = Controls()
+    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {}, controls)))
+    controls.paused.set()
+    assert client.post("/api/control/listen").json() == {"ok": True, "paused": False}
+    assert controls.listen_now.is_set() and not controls.paused.is_set()     # push-to-talk also unpauses
+    assert client.post("/api/control/pause").json()["paused"] is True
+    client.post("/api/control/quit")
+    assert controls.quit.is_set()
+    assert client.post("/api/control/explode").status_code == 404
+    today = client.get("/api/today").json()
+    assert set(today) >= {"due_today", "due_soon", "classes", "reminders", "date"}
+    no_controls = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})))
+    assert no_controls.post("/api/control/listen").status_code == 409        # text mode: no mic to control
+
+
+# ---------- meeting & lecture notes ----------
+
+def speechy(seconds, amp=0.2, seed=0):
+    rng = np.random.default_rng(seed)
+    return (rng.normal(0, amp, int(seconds * 16000))).astype(np.float32)
+
+
+def test_segmenter_cuts_near_pauses():
+    from max_assistant.notes import Segmenter
+
+    seg = Segmenter(min_s=25, max_s=32)
+    audio = np.concatenate([speechy(24), np.zeros(8000, np.float32), speechy(12)])     # pause at 24 s
+    chunks = seg.push(audio) + seg.flush()
+    assert len(chunks) == 2
+    assert abs(len(chunks[0][1]) / 16000 - 24.0) < 0.6          # cut inside the pause, not mid-"word"
+    assert chunks[1][0] == len(chunks[0][1]) / 16000             # second chunk's timestamp follows on
+
+
+def test_note_session_map_reduce_and_deadline_quotes(tmp_path):
+    from max_assistant.notes import NoteSession, save
+
+    said = iter(["Today we cover knowledge graphs and RDF triples.",
+                 "Assignment two is due next Friday at 11:59 PM on Canvas.",
+                 "Also there is a quiz on Monday about SPARQL."])
+    calls = []
+
+    def summarize(system, text, max_tokens):
+        calls.append(system.split()[0])
+        return "## Summary\nKnowledge graphs.\n## Key points\n- RDF" if "Combine" in system else f"- notes on: {text[:30]}"
+
+    session = NoteSession("lecture", lambda audio, prompt: next(said), summarize, title="CSE 573", section_words=8)
+    for _ in range(3):
+        session.push(speechy(26))
+        session.push(np.zeros(16000, np.float32))
+    result = session.finish()
+    assert result.word_count == sum(len(s.split()) for s in ["Today we cover knowledge graphs and RDF triples.",
+                                                              "Assignment two is due next Friday at 11:59 PM on Canvas.",
+                                                              "Also there is a quiz on Monday about SPARQL."])
+    assert calls.count("You") >= 2 and calls[-1] == "Combine"   # section notes, then one final combine
+    assert "## Deadlines & dates (exact quotes)" in result.notes_md
+    assert "due next Friday at 11:59 PM" in result.notes_md and "quiz on Monday" in result.notes_md
+    folder = save(result, tmp_path)
+    assert (folder / "notes.md").read_text(encoding="utf-8").startswith("# CSE 573")
+    assert "[00:" in (folder / "transcript.md").read_text(encoding="utf-8")
+
+
+def test_note_session_skips_silence():
+    from max_assistant.notes import NoteSession
+
+    heard = []
+    session = NoteSession("meeting", lambda a, p: heard.append(1) or "x", lambda s, t, n: "", section_words=100)
+    session.push(np.zeros(16000 * 30, np.float32))
+    result = session.finish()
+    assert heard == [] and "Nothing was transcribed" in result.notes_md
+
+
+def test_direct_routes_for_notes_and_forget():
+    from max_assistant.agent import direct_route
+
+    tools = {"forget", "start_notes", "stop_notes"}
+    assert direct_route("take notes on this lecture", tools) == ("start_notes", {"kind": "lecture"})
+    assert direct_route("I'm in a Teams call, can you take notes", tools) == ("start_notes", {"kind": "meeting"})
+    assert direct_route("stop taking notes", tools) == ("stop_notes", {})
+    assert direct_route("the meeting is over", tools) == ("stop_notes", {})
+    assert direct_route("take a note: buy eggs", tools) is None          # quick note: not a recording
+    assert direct_route("what were the key points of the lecture", tools) is None
+    assert direct_route("take notes", {"forget"}) is None                # tool not available
+
+
+def test_api_notes_start_stop():
+    from fastapi.testclient import TestClient
+
+    from max_assistant.events import ApprovalBroker, EventBus
+    from max_assistant.server import Runtime, create_app
+
+    class FakeNotes:
+        def __init__(self):
+            self.started = None
+
+        def start(self, kind, title):
+            self.started = (kind, title)
+            return type("S", (), {"title": title or "Lecture", "kind": kind})()
+
+        def stop(self):
+            pass
+
+        def status(self):
+            return {"active": self.started is not None}
+
+    ctx = digest_ctx()
+    ctx.notes = FakeNotes()
+    bus = EventBus()
+    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})))
+    r = client.post("/api/notes/start", json={"kind": "meeting", "title": "Standup"})
+    assert r.status_code == 200 and r.json()["kind"] == "meeting" and ctx.notes.started == ("meeting", "Standup")
+    assert client.get("/api/notes/status").json() == {"active": True}
+    assert client.post("/api/notes/stop").json() == {"ok": True}

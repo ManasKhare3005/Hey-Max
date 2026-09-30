@@ -69,6 +69,25 @@ INTENTS = {
 # always asks the user to confirm, so a wrong match is harmless
 FORGET = re.compile(r"^\W*(?:please\s+|can you\s+|could you\s+|max,?\s+)*forget\s+"
                     r"(?:about\s+|that\s+|what i (?:told|said to) you about\s+|the\s+)?(.+?)[.?!]*$", re.I)
+NOTES_STOP = re.compile(r"\b(stop|end|finish)\s+(taking\s+)?(the\s+)?(notes|recording|note[- ]taking)\b|"
+                        r"\b(the\s+)?(meeting|lecture|class|call)\s+(is\s+)?(over|done|finished|ended)\b", re.I)
+NOTES_START = re.compile(r"\btake\s+(some\s+)?notes\b|\b(start|begin)\s+(taking\s+|recording\s+)?(the\s+)?notes\b|"
+                         r"\brecord\s+(this|the|my)\s+(lecture|class|meeting|call|session|talk)\b|"
+                         r"\bnotes\s+(for|on|of|during)\s+(this|the|my)\s+\w*\s*(lecture|class|meeting|call)\b", re.I)
+MEETING_WORDS = re.compile(r"\b(meeting|zoom|teams|call|google meet|webex|video|webinar|stream)\b", re.I)
+
+
+def direct_route(user_text: str, tools) -> tuple[str, dict] | None:
+    """Requests the small model handled unreliably (claimed actions it didn't take), mapped straight
+    to their tool. Each is safe to run without the model: forget confirms, notes can be stopped."""
+    text = user_text.strip()
+    if "forget" in tools and (m := FORGET.match(text)):
+        return "forget", {"what": m.group(1)}
+    if "stop_notes" in tools and NOTES_STOP.search(text):
+        return "stop_notes", {}
+    if "start_notes" in tools and NOTES_START.search(text):
+        return "start_notes", {"kind": "meeting" if MEETING_WORDS.search(text) else "lecture"}
+    return None
 
 
 def parse_yes_no(text: str | None) -> bool:
@@ -172,13 +191,14 @@ class Agent:
         answer = None
 
         try:
-            route = FORGET.match(user_text.strip()) if "forget" in self.registry.tools else None
+            route = direct_route(user_text, self.registry.tools)
             if route:
+                name, args = route
                 self.on_event("thinking", {"model": "direct", "step": 0})
                 messages.append({"role": "assistant", "content": "",
-                                 "tool_calls": [{"function": {"name": "forget", "arguments": {"what": route.group(1)}}}]})
-                result = self._run_call("forget", {"what": route.group(1)}, model)
-                messages.append({"role": "tool", "content": result, "tool_name": "forget"})
+                                 "tool_calls": [{"function": {"name": name, "arguments": args}}]})
+                result = self._run_call(name, args, model)
+                messages.append({"role": "tool", "content": result, "tool_name": name})
                 answer = "Okay, I won't." if result == DECLINED else result
             for step in range(0 if route else self.max_steps):
                 self.on_event("thinking", {"model": model, "step": step})
