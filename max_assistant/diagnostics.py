@@ -35,8 +35,9 @@ def foreground_window() -> str:
 
 
 class Heartbeat:
-    def __init__(self, mic, interval_s: float = 30.0, stuck_after_s: float = 60.0):
+    def __init__(self, mic, interval_s: float = 30.0, stuck_after_s: float = 60.0, publish=None):
         self.mic = mic
+        self.publish = publish or (lambda kind, data: None)   # event bus (dashboard)
         self.interval_s = interval_s
         self.stuck_after_s = stuck_after_s
         self.stage = "starting"
@@ -46,6 +47,7 @@ class Heartbeat:
 
     def set(self, stage: str):
         self.stage, self.since = stage, time.monotonic()
+        self.publish("stage", {"stage": stage})
 
     def start(self):
         threading.Thread(target=self._run, name="heartbeat", daemon=True).start()
@@ -72,6 +74,9 @@ class Heartbeat:
             problem = got < expected * 0.5 or lost or (waiting and self.mic.backlog > 12) or \
                 (not waiting and in_stage > self.stuck_after_s)
             (log.warning if problem else log.info)(msg)
+            self.publish("heartbeat", {"stage": self.stage, "in_stage_s": round(in_stage), "frames": got,
+                                       "expected": expected, "level_dbfs": round(level), "queued": self.mic.backlog,
+                                       "dropped": lost, "ok": not problem})
             if self.stage != "waiting for wake word" and in_stage > self.stuck_after_s \
                     and self._dumped_for != self.since:
                 self._dumped_for = self.since

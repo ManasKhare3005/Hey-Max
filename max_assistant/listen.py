@@ -51,6 +51,7 @@ def listen_for_command(
     max_record_s: float = 15.0,
     early_s: float = 0.4,
     max_silence_s: float = 1.8,
+    should_stop: Callable[[], bool] | None = None,
 ) -> str:
     """Record until the speaker is done and return the transcript ('' if nothing was said)."""
     frame_s = FRAME / mic.sample_rate
@@ -65,6 +66,8 @@ def listen_for_command(
         return np.concatenate(frames).astype(np.float32) / 32768.0
 
     while elapsed < max_record_s:
+        if should_stop is not None and should_stop():
+            return ""
         frame = mic.read(timeout=1.0)
         if frame is None:
             continue

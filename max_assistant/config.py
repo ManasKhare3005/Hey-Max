@@ -27,6 +27,13 @@ def load_config(path: str | Path | None = None) -> Section:
     path = Path(path) if path else ROOT / "config.yaml"
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
+    # Private values (feed links, app passwords) live in secrets.yaml, which git ignores
+    secrets = ROOT / "secrets.yaml"
+    if secrets.exists():
+        with open(secrets, "r", encoding="utf-8") as f:
+            data["secrets"] = yaml.safe_load(f) or {}
+    else:
+        data.setdefault("secrets", {})
     return Section(data)
 
 

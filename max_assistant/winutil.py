@@ -114,6 +114,11 @@ class BackgroundWriter(io.TextIOBase):
 
 def unblock_console():
     """Route stdout/stderr through BackgroundWriter and turn off QuickEdit (Windows)."""
+    if sys.stdout is None:                     # pythonw (tray mode): there is no console at all
+        import os
+
+        sys.stdout = sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        return
     if not isinstance(sys.stdout, BackgroundWriter):
         sys.stdout = BackgroundWriter(sys.stdout)
         sys.stderr = BackgroundWriter(sys.stderr)
@@ -128,3 +133,16 @@ def unblock_console():
             kernel32.SetConsoleMode(handle, (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS)
     except Exception as exc:
         log.debug("couldn't change console mode: %s", exc)
+
+
+def single_instance(name: str = "MaxAssistantVoice"):
+    """Returns a handle while this is the only running copy, or None if Max is already running.
+    Keep the handle alive for the life of the process (the OS releases it on exit)."""
+    if sys.platform != "win32":
+        return object()
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, "Local\\" + name)
+    if ctypes.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
+        return None
+    return handle

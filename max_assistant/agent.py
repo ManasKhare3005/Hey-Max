@@ -34,6 +34,8 @@ How to behave:
 - Your replies are spoken aloud. Keep them short: one or two sentences, no markdown, no lists, no emojis.
 - When a request maps to a tool, call the tool instead of describing what you would do.
 - Never say you did something (opened, clicked, went back, read) unless a tool did it in this turn.
+- Remembering, forgetting and reminders only happen through the remember, forget, set_reminder
+  and cancel_reminder tools. "(You remember: ...)" notes are just context, not actions.
 - Websites and searches open in your own browser window. For anything about the page on screen
   (click, type, scroll, go back, read or summarize it, tabs), use the browser_* tools. You CAN
   click any button, including subscribe, sign in or buy: just call the tool, and it asks the
@@ -49,6 +51,24 @@ YES = re.compile(r"\b(yes|yeah|yep|yup|sure|confirm|confirmed|do it|go ahead|aff
 NO = re.compile(r"\b(no|nope|nah|cancel|stop|don't|do not|never mind|nevermind|abort)\b", re.I)
 # Requests that may need several tool steps; don't short-cut these after the first tool
 COMPOUND = re.compile(r"\b(and|then|also|after that|plus)\b", re.I)
+# Replies that claim an action; if the matching tool wasn't called, nothing really happened
+CLAIMS = {
+    "forget": re.compile(r"\b(i('ve| have)? (forgotten|forgot|deleted|removed)|forgotten)\b", re.I),
+    "cancel_reminder": re.compile(r"\bcancel(l?ed)?\b.*\bremind|\bremind\w*\b.*\bcancel(l?ed)?\b", re.I),
+    "set_reminder": re.compile(r"\bi('ll| will) remind you\b", re.I),
+    "remember": re.compile(r"\bi('ll| will) remember\b|\b(saved|noted) that\b", re.I),
+}
+# Clear requests for those actions; if the reply neither used the tool nor asked a question, nudge
+INTENTS = {
+    "forget": re.compile(r"^\W*(please\s+|can you\s+|could you\s+)*forget\b", re.I),
+    "cancel_reminder": re.compile(r"\b(cancel|delete|remove)\b.*\breminder\b", re.I),
+    "set_reminder": re.compile(r"\bremind me\b", re.I),
+    "remember": re.compile(r"^\W*(please\s+|can you\s+)*remember\s+(that|my|this)\b", re.I),
+}
+# "forget ..." goes straight to the forget tool: the model was unreliable here, and forgetting
+# always asks the user to confirm, so a wrong match is harmless
+FORGET = re.compile(r"^\W*(?:please\s+|can you\s+|could you\s+|max,?\s+)*forget\s+"
+                    r"(?:about\s+|that\s+|what i (?:told|said to) you about\s+|the\s+)?(.+?)[.?!]*$", re.I)
 
 
 def parse_yes_no(text: str | None) -> bool:
@@ -85,6 +105,8 @@ class Agent:
         history_turns: int = 6,
         history_ttl_s: float = 300,
         history_chars: int = 4000,
+        recall: Callable[[str], str | None] | None = None,
+        on_turn: Callable[[str, str, list[str]], None] | None = None,
     ):
         self.llm = llm
         self.registry = registry
@@ -104,6 +126,8 @@ class Agent:
         self.history_ttl_s = history_ttl_s
         self.history_chars = history_chars    # ~1k tokens: system + tools already use ~2.3k of 4k
         self._last_turn = 0.0
+        self.recall = recall          # relevant saved facts for a request (memory), or None
+        self.on_turn = on_turn        # called after each turn: (user_text, answer, tools used)
 
     def _system(self) -> dict:
         content = SYSTEM_PROMPT.format(name=self.name, user=self.user_name)
@@ -134,20 +158,45 @@ class Agent:
     def handle(self, user_text: str) -> str:
         d = dt.datetime.now()
         now = f"{d:%a %b} {d.day} {d.year}, {d.hour % 12 or 12}:{d:%M %p}"   # no leading zeros: read aloud
-        user_msg = {"role": "user", "content": f"[{now}] {user_text}"}
+        content = f"[{now}] {user_text}"
+        memories = self.recall(user_text) if self.recall else None
+        if memories:
+            # In the user message, not the system prompt, so the cached prompt prefix still matches
+            content += f"\n(You remember: {memories})"
+        user_msg = {"role": "user", "content": content}
         messages = [self._system(), *self._recent_history(), user_msg]
         turn_start = len(messages) - 1
+        nudged = False
         model = self.fast_model
         tools = self.registry.schemas() + [ESCALATE_TOOL]
         answer = None
 
         try:
-            for step in range(self.max_steps):
+            route = FORGET.match(user_text.strip()) if "forget" in self.registry.tools else None
+            if route:
+                self.on_event("thinking", {"model": "direct", "step": 0})
+                messages.append({"role": "assistant", "content": "",
+                                 "tool_calls": [{"function": {"name": "forget", "arguments": {"what": route.group(1)}}}]})
+                result = self._run_call("forget", {"what": route.group(1)}, model)
+                messages.append({"role": "tool", "content": result, "tool_name": "forget"})
+                answer = "Okay, I won't." if result == DECLINED else result
+            for step in range(0 if route else self.max_steps):
                 self.on_event("thinking", {"model": model, "step": step})
                 reply = self.llm.chat(model, messages, tools)
 
                 if not reply.tool_calls:
                     answer = strip_thinking(reply.content)
+                    claimed = self._false_claim(answer, messages[turn_start:], user_text)
+                    if claimed and not nudged:
+                        # The small model sometimes says "I've forgotten that" without calling
+                        # the tool, so nothing happened. Tell it so, once.
+                        nudged = True
+                        log.info("reply claims %s without calling it; nudging", claimed)
+                        messages += [{"role": "assistant", "content": answer},
+                                     {"role": "user", "content": f"(System check: you said that, but you didn't call "
+                                      f"the {claimed} tool, so nothing actually happened. Call {claimed} now; it looks things up "
+                                      f"itself, even if you don't see the item in this conversation.)"}]
+                        continue
                     break
 
                 messages.append({
@@ -174,7 +223,8 @@ class Agent:
                     self.on_event("direct_reply", {"text": answer})
                     break
             else:
-                answer = "Sorry, I got stuck on that one. Could you rephrase it?"
+                if not route:
+                    answer = "Sorry, I got stuck on that one. Could you rephrase it?"
         except OllamaError as exc:
             log.error("LLM error: %s", exc)
             answer = str(exc)
@@ -184,7 +234,27 @@ class Agent:
         self.history.append(turn + [{"role": "assistant", "content": answer}])
         self._last_turn = time.monotonic()
         self.on_event("answer", {"text": answer})
+        if self.on_turn:
+            tools_used = [c["function"]["name"] for m in turn for c in m.get("tool_calls", [])]
+            try:
+                self.on_turn(user_text, answer, tools_used)
+            except Exception as exc:          # logging a turn must never break the reply
+                log.warning("turn logging failed: %s", exc)
         return answer
+
+    def _false_claim(self, answer: str, turn: list[dict], user_text: str = "") -> str | None:
+        """A tool the reply claims to have used, or the user clearly asked for, that wasn't
+        called this turn (so nothing actually happened). None if all is well."""
+        called = {c["function"]["name"] for m in turn for c in m.get("tool_calls", [])}
+        for tool, pattern in CLAIMS.items():
+            if tool not in called and tool in self.registry.tools and pattern.search(answer):
+                return tool
+        if answer.rstrip().endswith("?"):       # asking for details is fine
+            return None
+        for tool, pattern in INTENTS.items():
+            if tool not in called and tool in self.registry.tools and pattern.search(user_text):
+                return tool
+        return None
 
     def _direct_reply(self, name: str, result: str, spoken: list[str]) -> list[str] | None:
         """Add a tool's result to the spoken reply, or return None if the LLM must answer."""

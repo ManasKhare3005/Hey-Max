@@ -4,9 +4,9 @@
   what you said; Whisper always processes a fixed 30 s window (~1.8 s on this laptop).
 - Whisper small.en (faster-whisper): much better on quiet or noisy speech.
 
-Measured on test commands: equal accuracy down to ~10 dB signal-to-noise, then Moonshine
-falls apart (42% word errors vs 15% at ~5 dB). So clear recordings go to Moonshine and
-quiet/noisy ones to Whisper.
+Measured on synthetic test commands: equal accuracy down to ~10 dB signal-to-noise. But
+on Manas's real voice Moonshine misheard a lot ("close this tab" -> "close the staircase",
+"search" -> "third"), so Whisper is the default and Moonshine is opt-in (stt.fast_model_dir).
 """
 from __future__ import annotations
 
@@ -27,8 +27,13 @@ def snr_db(audio: np.ndarray, frame: int = 1280) -> float:
     n = len(audio) // frame
     if n < 5:
         return 0.0
-    energy = np.sqrt((audio[: n * frame].reshape(n, frame).astype(np.float64) ** 2).mean(axis=1)) + 1e-9
-    return float(20 * np.log10(np.percentile(energy, 90) / np.percentile(energy, 10)))
+    energy = np.sqrt((audio[: n * frame].reshape(n, frame).astype(np.float64) ** 2).mean(axis=1))
+    peak = np.abs(audio).max()
+    # Some mics gate silence to (near) digital zero, which would make any recording look
+    # perfectly clean; never assume the noise is quieter than -65 dB below full scale
+    full_scale = 1.0 if peak <= 1.0 else 32768.0
+    floor = max(np.percentile(energy, 10), full_scale * 10 ** (-65 / 20))
+    return float(20 * np.log10(max(np.percentile(energy, 90), 1e-9) / floor))
 
 
 class Moonshine:
@@ -52,13 +57,16 @@ class Moonshine:
 
 class SpeechToText:
     def __init__(self, model: str = "small.en", device: str = "cpu", compute_type: str = "int8",
-                 fast_model_dir: str | None = None, fast_min_snr_db: float = 12.0):
+                 fast_model_dir: str | None = None, fast_min_snr_db: float = 12.0, prompt: str | None = None):
         from faster_whisper import WhisperModel
 
         log.info("loading whisper %s on %s (%s)", model, device, compute_type)
         self.model = WhisperModel(model, device=device, compute_type=compute_type)
         self.fast = None
         self.fast_min_snr_db = fast_min_snr_db
+        # A hint about the vocabulary to expect (commands, app/site names). Measured: word
+        # errors on quiet speech 23.8% -> 19.3%, no change on clear speech, no invented text
+        self.prompt = prompt or None
         if fast_model_dir:
             try:
                 self.fast = Moonshine(fast_model_dir)
@@ -74,6 +82,7 @@ class SpeechToText:
             vad_filter=True,
             condition_on_previous_text=False,
             without_timestamps=True,
+            initial_prompt=self.prompt,
         )
         return " ".join(s.text.strip() for s in segments).strip()
 

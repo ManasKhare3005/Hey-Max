@@ -103,6 +103,21 @@ if (-not (Test-Path (Join-Path $moonDir "tokens.txt"))) {
     Remove-Item $moonArchive
 }
 
+Step "Downloading the memory embedding model"
+& $venvPy -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"; Check "Downloading the embedding model"
+
+# 4a. Dashboard (React, needs Node.js to build) ------------------------------------
+Step "Building the dashboard"
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    Push-Location (Join-Path $PSScriptRoot "dashboard")
+    npm install --no-fund --no-audit; Check "Installing dashboard packages"
+    npm run build; Check "Building the dashboard"
+    Pop-Location
+    Info "Dashboard ready: it opens at http://127.0.0.1:8765 while Max is running."
+} else {
+    Warn "Node.js not found, so the dashboard wasn't built (Max works without it). Install Node.js, then run: cd dashboard; npm install; npm run build"
+}
+
 # 4b. Private web search (SearXNG in Docker) -------------------------------------
 Step "Setting up private web search (SearXNG)"
 $envFile = Join-Path $PSScriptRoot "searxng\.env"

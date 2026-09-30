@@ -25,6 +25,7 @@ class Microphone:
         self.frames_in = 0   # frames delivered by the driver, muted or not (for diagnostics)
         self._sq_sum = 0.0   # running sum of mean-square levels, for the heartbeat
         self._sq_n = 0
+        self.on_level = None  # optional callback(mean_square) per frame, on the audio thread
         self._stream = sd.InputStream(
             samplerate=sample_rate,
             channels=1,
@@ -39,8 +40,11 @@ class Microphone:
             log.debug("mic status: %s", status)
         self.frames_in += 1
         x = indata[:, 0].astype(np.float32)
-        self._sq_sum += float(np.mean(x * x))
+        ms = float(np.mean(x * x))
+        self._sq_sum += ms
         self._sq_n += 1
+        if self.on_level is not None:        # live mic level for the dashboard orb
+            self.on_level(ms)
         if self.muted.is_set():
             return
         try:

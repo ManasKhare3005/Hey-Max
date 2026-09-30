@@ -8,3 +8,8 @@ logs/
 CLAUDE.md
 searxng/.env
 searxng/uwsgi.ini
+dashboard/node_modules/
+dashboard/dist/
+secrets.yaml
+docs/User Settings.pdf
+dashboard/*.tsbuildinfo

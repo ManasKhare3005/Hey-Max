@@ -2,7 +2,7 @@
 
 Say **"Hey Max"** and it listens, thinks with a local LLM, runs tools on your laptop and answers out loud. No cloud: wake word, speech recognition, the LLM and the voice all run on your machine.
 
-**Phases 1–2 of 6** — the voice loop, laptop control, web research and browser control. Coming next: memory + dashboard, Android app, Galaxy Watch app, Gmail/Calendar.
+**Phases 1–3 of 6** — the voice loop, laptop control, web research, browser control, memory, reminders and a live dashboard. Coming next: Android app, Galaxy Watch app, Gmail/Calendar.
 
 ## How it works
 
@@ -58,6 +58,7 @@ Make sure the **Ollama app is running** (it starts with Windows after install).
 - "Take a screenshot" · "Lock my laptop"
 - "Close Chrome" → asks for confirmation first
 - "Go to sleep" → unloads the models to free your GPU for gaming
+- "Search for something" → Max asks "What should I search for?" → just answer, no "Hey Max" needed (it listens for 5 s after any question it asks; `audio.follow_up`)
 - "Who won the most recent Super Bowl?" · "What's the weather in Tempe?" → searches and reads the top pages
 - "Search for cute dog pics" → "Show images instead" → "Open the first result" → "Go back"
 - "Open YouTube" → "Search for lofi music" → "Play the second video" → "Pause it"
@@ -74,11 +75,39 @@ In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete a
 - **False triggers / misses:** `wake_word.sherpa.threshold` (raise to trigger less, lower if it misses you). Check with `--wake-test`.
 - **Cuts you off mid-sentence:** raise `audio.silence_s` to 1.5.
 - **Doesn't notice you talking:** lower `audio.vad_sensitivity` to 2.0.
-- **Speech-to-text speed:** clear recordings go to Moonshine (~0.2 s), quiet or noisy ones to Whisper small.en (~1.8 s, much more accurate there); the split is `stt.fast_min_snr_db`. Transcription starts after 0.4 s of silence (`audio.early_s`) and Max answers right away if the sentence sounds finished; if you trail off ("search for…") it waits up to `audio.max_silence_s`. You can say "Hey Max, open YouTube" in one breath.
+- **Speech-to-text:** Whisper small.en, with a vocabulary hint (`stt.prompt`). Transcription starts after 0.4 s of silence (`audio.early_s`) and Max answers right away if the sentence sounds finished; if you trail off ("search for…") it waits up to `audio.max_silence_s`. You can say "Hey Max, open YouTube" in one breath. An optional fast engine (Moonshine, ~0.2 s instead of ~1.8 s) can be enabled with `stt.fast_model_dir`; it's fine for some voices but misheard others a lot, so it's off by default.
 - **Quiet voice not waking it:** the wake word is tuned for quiet speech already (`wake_word.sherpa`). What limits it is your voice vs. room noise, which gain can't fix. Turn up the mic in Windows sound settings, get closer to the mic, or turn on your mic's noise suppression ("Voice Clarity" / audio enhancements) in Windows.
 - **Different LLMs:** any Ollama model with tool support, e.g. `llama3.2:3b` or `qwen2.5:7b`. Pull it with `ollama pull <name>`.
 - **GPU memory:** `llm.keep_alive` sets how long a model stays loaded after use.
 - **Add app shortcuts:** add `spoken name: command` under `apps:`. Apps not listed are found automatically via the Start Menu.
+
+## Memory and reminders
+
+- **Remember:** "Hey Max, remember that my exam is on Friday." Facts live in `data/max.db` (SQLite) with local embeddings (bge-small, CPU) so Max finds them by meaning. Relevant facts are attached to your requests automatically ("When is my exam?"). "Forget ..." always asks you to confirm first.
+- **Recall past conversations:** "What did I ask you yesterday?" Every turn is logged and searchable.
+- **Reminders:** "Remind me about the exam the day before at 7 pm", "in 2 hours", "tomorrow morning". When due, Max says it out loud (once it's idle) and shows a Windows notification. Reminders that came due while Max was off are announced at the next start. "What reminders do I have?" / "Cancel the exam reminder".
+
+## Canvas and the daily digest
+
+- **Canvas (ASU):** put your Canvas calendar feed link (Canvas → Calendar → Calendar Feed) in `secrets.yaml` (never committed). Then ask "What's due today?", "What do I have this week?", "When's my next class?". Read-only; assignments, quizzes and class sessions (with Zoom links). Cross-listed duplicate sessions are filtered out.
+- **Day summary:** "What does my day look like?"
+- **Daily digest email** every morning (`digest` in `config.yaml`, default 7:00): what's due today and in the next 3 days, today's classes and reminders, with a short focus note from the local model. Sent through Gmail with an [app password](https://myaccount.google.com/apppasswords) in `secrets.yaml`. If the laptop was off, it's sent when Max starts (until 6 PM); never twice a day. "Email me my summary" sends it on demand.
+
+## Always on
+
+`powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1` makes Max start at login in the background (no console window) with a tray icon: open dashboard, pause listening, sleep models (free the GPU), quit. It restarts itself if it crashes; `-Uninstall` removes it. Starting Max a second time just opens the dashboard.
+
+## Dashboard
+
+While Max runs, open **http://127.0.0.1:8765** (this laptop only). A mission-control view of the assistant:
+
+- a live **orb** that breathes, listens, thinks and speaks with Max, plus status (LLM on GPU, VRAM, search, browser, memory)
+- the **conversation**, with the tools used for each answer; you can **type commands** too (replies stay silent)
+- **approvals**: risky actions show Approve / Deny, racing the spoken yes/no
+- **live activity**: tool calls, results, reminders, approvals as they happen
+- **memory & reminders** drawer: search facts by meaning, add or forget them, set and cancel reminders
+
+The same REST + WebSocket API (`/api/docs`) is what the phone and watch apps will use. Built with React + Vite + TypeScript (`dashboard/`); `setup.ps1` builds it if Node.js is installed. For UI work: `cd dashboard && npm run dev` (proxies to a running Max).
 
 ## Web search and browsing
 
@@ -124,12 +153,18 @@ max_assistant/
   stt.py         faster-whisper
   tts.py         Piper / Windows voice
   web.py         SearXNG/DuckDuckGo search, page reading, passage ranking
+  memory.py      SQLite + embeddings: facts, conversation log, action log
+  reminders.py   natural-language times, scheduler, Windows notifications
+  events.py      event bus + approval broker (voice or dashboard)
+  server.py      FastAPI: REST + WebSocket, serves the dashboard
   browser.py     Max's Chrome window (Playwright), element finding
   tools/
     registry.py  @tool decorator, schemas, risky flags
     system.py    laptop tools
     web.py       web_search
     browser.py   click / type / navigate / read / tabs
+    memory.py    remember / recall / forget, reminders
+dashboard/      React + Vite + TypeScript mission-control UI
 tests/           pytest suite (runs without a mic, GPU or Ollama)
 ```
 

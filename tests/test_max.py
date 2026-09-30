@@ -760,3 +760,357 @@ def test_listen_retranscribes_everything_when_it_still_sounds_unfinished():
     text = listen_for_command(FakeMic(frames), NoiseFloor(100), transcribe, silence_s=1.0, early_s=0.4, max_silence_s=1.8)
     assert text == "search for arctic monkeys on YouTube"
     assert len(seen) == 2 and seen[1] > seen[0]      # second pass covered the quiet tail too
+
+
+# ---------- follow-up conversation ----------
+
+def run_converse(first, replies, follow_ups, follow_up=True):
+    from max_assistant.main import converse
+
+    replies, follow_ups, said, idle = iter(replies), iter(follow_ups), [], []
+
+    def respond(text):
+        said.append(text)
+        return next(replies) if text is not None else None
+
+    n = converse(first, respond, lambda: next(follow_ups), follow_up=follow_up, on_idle=lambda: idle.append(1))
+    return n, said, idle
+
+
+def test_follow_up_after_a_question_without_wake_word():
+    n, said, idle = run_converse("search for something",
+                                 ["What should I search for?", "Searching Google for lofi music."],
+                                 ["lofi music"])
+    assert said == ["search for something", "lofi music"] and n == 2
+
+
+def test_no_follow_up_after_a_statement():
+    n, said, _ = run_converse("open youtube", ["Opened youtube.com."], [])   # follow_ups would raise if used
+    assert n == 1
+
+
+def test_follow_up_ends_on_silence_or_phantom_text():
+    n, said, idle = run_converse("play something", ["Which song?"], [""])
+    assert n == 1 and idle == [1]                      # silence -> back to waiting for "Hey Max"
+    n, said, idle = run_converse("play something", ["Which song?"], ["Thank you."])
+    assert n == 1 and idle == [1]                      # classic phantom transcript ignored
+
+
+def test_follow_ups_chain_and_can_be_turned_off():
+    n, said, _ = run_converse("set a reminder", ["For when?", "What should it say?", "Noted."],
+                              ["tomorrow", "call mom"])
+    assert said == ["set a reminder", "tomorrow", "call mom"] and n == 3
+    n, said, _ = run_converse("search", ["What for?"], [], follow_up=False)
+    assert n == 1
+
+
+def test_never_mind_in_a_follow_up():
+    n, said, _ = run_converse("search", ["What should I search for?"], ["never mind"])
+    assert said == ["search", None] and n == 1        # None = the "Okay." path
+
+
+def test_snr_not_fooled_by_noise_gated_mic():
+    from max_assistant.stt import snr_db
+
+    gated = np.concatenate([np.zeros(8000), np.sin(np.arange(16000) / 5) * 0.3, np.zeros(8000)]).astype(np.float32)
+    assert snr_db(gated) < 70            # digital-zero "silence" no longer means a perfect recording
+
+
+# ---------- memory & reminders ----------
+
+class WordEmbedder:
+    """Deterministic stand-in for the real embedder: hashed bag of words, normalised."""
+
+    def embed(self, texts):
+        import re as _re
+        out = np.zeros((len(texts), 256), dtype=np.float32)
+        for i, t in enumerate(texts):
+            for w in _re.findall(r"[a-z0-9]+", t.lower()):
+                if w not in {"my", "is", "the", "a", "on", "what", "when", "s"}:
+                    out[i, hash(w) % 256] += 1
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.where(norms == 0, 1, norms)
+
+
+def memory_store():
+    from max_assistant.memory import MemoryStore
+    return MemoryStore(":memory:", WordEmbedder())
+
+
+def test_memory_facts_search_dedupe_delete():
+    m = memory_store()
+    fid, old = m.add_fact("My CSE 572 exam is on Friday October 2.")
+    assert old is None
+    m.add_fact("My sister's name is Priya")
+    hits = m.search_facts("when is my CSE 572 exam", k=1)
+    assert hits[0].text == "My CSE 572 exam is on Friday October 2"
+    _, old = m.add_fact("My CSE 572 exam is on Friday October 2")        # same fact again
+    assert old is not None and len(m.facts()) == 2
+    assert m.delete_fact(fid) and len(m.facts()) == 1
+    assert not m.search_facts("CSE 572 exam", min_score=0.5)
+
+
+def test_memory_turns_and_actions():
+    m = memory_store()
+    m.log_turn("search for arctic monkeys", "Searching YouTube for arctic monkeys.", ["open_website"])
+    m.log_turn("set volume to 30", "Volume set to about 30 percent.", ["volume"])
+    assert m.search_turns("arctic monkeys", k=1)[0].text.startswith("you: search for arctic monkeys")
+    assert [t["tools"] for t in m.recent_turns()] == [["open_website"], ["volume"]]
+    m.log_action("tool", {"tool": "volume", "result": "ok"})
+    assert m.actions()[-1]["detail"]["tool"] == "volume"
+
+
+def test_context_for_only_attaches_relevant_facts():
+    m = memory_store()
+    m.add_fact("My CSE 572 exam is on Friday October 2")
+    assert "exam" in (m.context_for("CSE 572 exam Friday October") or "")
+    assert m.context_for("open youtube") is None
+
+
+def test_parse_when_phrases():
+    import datetime as dt
+    from max_assistant.reminders import parse_when, spoken_time
+
+    now = dt.datetime(2026, 9, 30, 0, 45)          # Wednesday, 12:45 AM
+    cases = {"Friday at 9am": (2026, 10, 2, 9, 0), "friday": (2026, 10, 2, 9, 0),
+             "tomorrow morning": (2026, 10, 1, 9, 0), "tonight at 9": (2026, 9, 30, 21, 0),
+             "next Monday 8am": (2026, 10, 5, 8, 0), "in 2 hours": (2026, 9, 30, 2, 45),
+             "Thursday evening": (2026, 10, 1, 18, 0), "2026-10-02T09:00": (2026, 10, 2, 9, 0)}
+    for phrase, expect in cases.items():
+        assert parse_when(phrase, now) == dt.datetime(*expect), phrase
+    assert parse_when("gibberish zzz", now) is None
+    assert spoken_time(dt.datetime(2026, 10, 1, 18, 0), now) == "tomorrow at 6 PM"
+    assert spoken_time(dt.datetime(2026, 10, 2, 9, 30), now) == "Friday, October 2 at 9:30 AM"
+
+
+def test_reminder_scheduler_fires_due_and_flags_missed():
+    import datetime as dt
+    from max_assistant.reminders import ReminderScheduler, Reminders
+
+    r = Reminders(memory_store())
+    now = dt.datetime.now()
+    r.add("stretch", now - dt.timedelta(seconds=30))       # just due
+    r.add("exam", now - dt.timedelta(hours=3))             # came due while Max was off
+    r.add("later", now + dt.timedelta(hours=1))
+    fired = []
+    ReminderScheduler(r, lambda rem, missed: fired.append((rem.text, missed))).check(now)
+    assert sorted(fired) == [("exam", True), ("stretch", False)]
+    assert [x.text for x in r.pending()] == ["later"]      # fired ones aren't repeated
+
+
+def memory_registry(confirm_answer=True):
+    from max_assistant.reminders import Reminders
+    from max_assistant.tools import memory as memory_tools
+
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.memory = memory_store()
+    ctx.reminders = Reminders(ctx.memory)
+    ctx.confirm = lambda p: confirm_answer
+    reg = ToolRegistry(context=ctx)
+    memory_tools.register(reg)
+    return reg, ctx
+
+
+def test_memory_tools_end_to_end():
+    reg, ctx = memory_registry()
+    assert reg.run("remember", {"fact": "My CSE 572 exam is on Friday October 2"}) == "Got it, I'll remember that."
+    out = reg.run("recall", {"query": "when is my CSE 572 exam"})
+    assert "Friday October 2" in out
+    assert reg.run("forget", {"what": "CSE 572 exam"}) == "Forgotten."
+    assert reg.run("recall", {"query": "CSE 572 exam"}) == "Nothing saved about that."
+
+
+def test_reminder_tools():
+    reg, ctx = memory_registry()
+    out = reg.run("set_reminder", {"text": "CSE 572 exam", "when": "tomorrow at 9am"})
+    assert out.startswith("Okay, I'll remind you tomorrow at 9 AM")
+    assert reg.run("set_reminder", {"text": "x", "when": "blorp"}).startswith("Error")
+    reg.run("set_reminder", {"text": "call mom", "when": "in 2 hours"})
+    assert reg.run("list_reminders", {}).startswith("You have 2 reminders")
+    assert reg.run("cancel_reminder", {"which": "the exam"}) == "Cancelled the reminder: CSE 572 exam."
+    assert [r.text for r in ctx.reminders.pending()] == ["call mom"]
+
+
+def test_agent_attaches_memories_and_logs_turns(tmp_path):
+    logged = []
+    llm = FakeLLM([ChatReply("", [ToolCall("take_note", {"text": "x"})])])
+    agent = Agent(llm, make_registry(tmp_path), "fast", "planner",
+                  recall=lambda t: "Manas's exam is on Friday" if "exam" in t else None,
+                  on_turn=lambda u, a, tools: logged.append((u, a, tools)))
+    agent.handle("note about my exam")
+    assert "(You remember: Manas's exam is on Friday)" in llm.calls[0]["messages"][-1]["content"]
+    assert logged == [("note about my exam", "Noted.", ["take_note"])]
+
+
+# ---------- dashboard API ----------
+
+def api_client(run_command=lambda text: f"echo: {text}"):
+    from fastapi.testclient import TestClient
+
+    from max_assistant.events import ApprovalBroker, EventBus
+    from max_assistant.reminders import Reminders
+    from max_assistant.server import Runtime, create_app
+
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.memory = memory_store()
+    ctx.reminders = Reminders(ctx.memory)
+    bus = EventBus()
+    approvals = ApprovalBroker(bus)
+    rt = Runtime(ctx, bus, approvals, run_command, {"name": "Max"})
+    return TestClient(create_app(rt)), rt
+
+
+def test_api_facts_reminders_and_commands():
+    client, rt = api_client()
+    assert client.post("/api/facts", json={"text": "My sister's name is Priya"}).json()["updated"] is False
+    facts = client.get("/api/facts").json()
+    assert [f["text"] for f in facts] == ["My sister's name is Priya"]
+    assert client.delete(f"/api/facts/{facts[0]['id']}").json() == {"ok": True}
+    r = client.post("/api/reminders", json={"text": "exam", "when": "tomorrow at 9am"}).json()
+    assert r["spoken"] == "tomorrow at 9 AM"
+    assert [x["text"] for x in client.get("/api/reminders").json()] == ["exam"]
+    assert client.post("/api/reminders", json={"text": "x", "when": "blorp"}).status_code == 400
+    assert client.post("/api/command", json={"text": "open youtube"}).json() == {"reply": "echo: open youtube"}
+    assert [e["kind"] for e in rt.bus.recent][-1] == "reminder"
+
+
+def test_api_approvals_race_and_websocket():
+    client, rt = api_client()
+    a = rt.approvals.open("Shut down the laptop?", "power")
+    assert client.get("/api/state").json()["approvals"] == [{"id": a.id, "prompt": "Shut down the laptop?", "tool": "power"}]
+    assert client.post(f"/api/approvals/{a.id}", json={"approved": True}).json() == {"ok": True}
+    assert a.done.is_set() and a.approved is True
+    rt.approvals.close(a, True, "dashboard")
+    assert client.post(f"/api/approvals/{a.id}", json={"approved": False}).status_code == 404
+    with client.websocket_connect("/api/ws") as ws:
+        hello = ws.receive_json()
+        assert hello["kind"] == "hello" and any(e["kind"] == "approval_result" for e in hello["data"]["recent"])
+        rt.bus.publish("stage", {"stage": "thinking"})
+        assert ws.receive_json()["data"] == {"stage": "thinking"}
+
+
+def test_forget_requests_skip_the_model_and_still_confirm():
+    from max_assistant.agent import FORGET
+
+    assert FORGET.match("could you forget my exam").group(1) == "my exam"
+    assert FORGET.match("can you forget what I told you about lofi").group(1) == "lofi"
+    assert FORGET.match("I forgot my keys") is None and FORGET.match("don't forget to call mom") is None
+    reg, ctx = memory_registry(confirm_answer=False)
+    ctx.memory.add_fact("Manas prefers lofi music when studying")
+    llm = FakeLLM([])                                   # would raise if the model were asked
+    agent = Agent(llm, reg, "fast", "planner")
+    assert agent.handle("forget the lofi music when studying") == "Okay, I won't."
+    assert len(ctx.memory.facts()) == 1 and llm.calls == []
+
+
+def test_false_claim_gets_one_nudge():
+    reg, ctx = memory_registry()
+    llm = FakeLLM([ChatReply("Okay, I'll remind you tomorrow."),               # claims, no tool
+                   ChatReply("", [ToolCall("set_reminder", {"text": "gym", "when": "tomorrow at 7am"})])])
+    agent = Agent(llm, reg, "fast", "planner")
+    assert agent.handle("remind me about gym tomorrow at 7").startswith("Okay, I'll remind you tomorrow at 7 AM")
+    assert "System check" in llm.calls[1]["messages"][-1]["content"]
+    assert [r.text for r in ctx.reminders.pending()] == ["gym"]
+
+
+# ---------- Canvas & daily digest ----------
+
+ICS = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:test
+BEGIN:VEVENT
+UID:event-assignment-1
+DTSTART;VALUE=DATE:20261001
+SUMMARY:Lab 4 [2026FallC-T-CSE572-68549]
+END:VEVENT
+BEGIN:VEVENT
+UID:event-assignment-2
+DTSTART;VALUE=DATE:20261004
+SUMMARY:Assignment1 [2026FallC-T-CSE579-73246]
+END:VEVENT
+BEGIN:VEVENT
+UID:event-calendar-event-10
+DTSTART:20261001T120000Z
+DTEND:20261001T131500Z
+SUMMARY:CSE 573: Semantic Web Mining (2026 Fall C) [2026FallC-T-CSE573-82398]
+DESCRIPTION:[Click here to join Zoom Meeting] (https://asu.zoom.us/j/123)
+END:VEVENT
+BEGIN:VEVENT
+UID:event-calendar-event-11
+DTSTART:20261001T120000Z
+DTEND:20261001T131500Z
+SUMMARY:CSE 573: Semantic Web Mining (2024 Spring) [2026FallC-T-CSE573-82398]
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_canvas_feed_parsing():
+    from max_assistant.canvas import describe_due, parse_feed
+
+    items = parse_feed(ICS)
+    assignments = [i for i in items if i.kind == "assignment"]
+    classes = [i for i in items if i.kind == "class"]
+    assert [(a.title, a.course, a.all_day) for a in assignments] == [("Lab 4", "CSE 572", True), ("Assignment1", "CSE 579", True)]
+    assert len(classes) == 1                                  # other section's copy dropped
+    assert classes[0].course == "CSE 573" and classes[0].link == "https://asu.zoom.us/j/123"
+    assert describe_due(assignments[:1], "today") == "Due today: Lab 4 for CSE 572, by end of day."
+    assert describe_due([], "tomorrow") == "Nothing due tomorrow on Canvas."
+
+
+class FakeFeed:
+    def __init__(self, items):
+        self._items = items
+
+    def between(self, start, end, kind=None):
+        return [i for i in self._items if start <= i.start < end and (kind is None or i.kind == kind)]
+
+
+def digest_ctx(tmp_items=None):
+    import datetime as dt
+    from max_assistant.canvas import parse_feed
+    from max_assistant.reminders import Reminders
+
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.memory = memory_store()
+    ctx.reminders = Reminders(ctx.memory)
+    ctx.canvas = FakeFeed(parse_feed(ICS) if tmp_items is None else tmp_items)
+    ctx.reminders.add("stand-up", dt.datetime(2026, 10, 1, 10, 0))
+    return ctx
+
+
+def test_digest_content_and_spoken_summary():
+    import datetime as dt
+    from max_assistant.digest import gather, render, spoken
+
+    plan = gather(digest_ctx(), dt.date(2026, 10, 1))
+    assert [i.title for i in plan.due_today] == ["Lab 4"] and [i.title for i in plan.due_soon] == ["Assignment1"]
+    assert len(plan.classes) == 1 and [r.text for r in plan.reminders] == ["stand-up"]
+    subject, text, body = render(plan, "Focus on Lab 4 first.")
+    assert subject == "Your day, Thu Oct 1: 1 due today"
+    assert "Lab 4 (CSE 572) by end of day" in text and "Zoom: https://asu.zoom.us/j/123" in text
+    assert "Focus on Lab 4 first." in body and "<li" in body
+    s = spoken(plan)
+    assert s.startswith("Due today: Lab 4 for CSE 572.") and "Coming up: Assignment1" in s
+
+
+def test_digest_schedule_catch_up_and_once_a_day():
+    import datetime as dt
+    from max_assistant.digest import DigestScheduler
+
+    ctx = digest_ctx()
+    sched = DigestScheduler(ctx, "07:00", weekends=False, catch_up_until="18:00")
+    thu = dt.datetime(2026, 10, 1, 6, 59)
+    assert not sched.due(thu)                                       # too early
+    assert sched.due(thu.replace(hour=9))                           # late start: catch up
+    assert not sched.due(thu.replace(hour=19))                      # too late to be useful
+    assert not sched.due(dt.datetime(2026, 10, 3, 8, 0))            # Saturday, weekends off
+    ctx.memory.set("digest_last_sent", "2026-10-01")
+    assert not sched.due(thu.replace(hour=9))                       # already sent today
+
+
+def test_digest_refuses_placeholder_email_settings():
+    from max_assistant.digest import send_email
+
+    with pytest.raises(RuntimeError, match="isn't set up"):
+        send_email({"smtp_user": "your.address@gmail.com", "app_password": "xxxx xxxx xxxx xxxx"}, "s", "t", "<p>h</p>")

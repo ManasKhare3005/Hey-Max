@@ -74,6 +74,28 @@ browser:
   channel: chrome
   headless: false
 
+memory:
+  # Facts you ask Max to remember, the conversation log, reminders and the action log
+  enabled: true
+  db: data/max.db
+
+digest:
+  # Morning email: what's due (Canvas), classes and reminders for the day.
+  # Needs the email section in secrets.yaml (Gmail + app password).
+  enabled: true
+  time: "07:00"
+  weekends: true
+  # If the laptop was off at `time`, send when Max starts, but not after this
+  catch_up_until: "18:00"
+
+dashboard:
+  # Live dashboard + API (the phone/watch apps will use the same API in Phase 4)
+  enabled: true
+  host: 127.0.0.1        # this laptop only
+  port: 8765
+  # Speak replies to commands typed in the dashboard (off: typing usually means "be quiet")
+  speak_typed_replies: false
+
 audio:
   sample_rate: 16000
   # null = system default microphone. Run `python -m max_assistant --list-devices` to see options
@@ -89,6 +111,10 @@ audio:
   # Give up if you say nothing for this long after the wake word
   no_speech_timeout_s: 5.0
   max_record_s: 15.0
+  # When Max's reply is a question, listen for your answer without the wake word
+  follow_up: true
+  # ...for this long before going back to waiting for "Hey Max"
+  follow_up_timeout_s: 5.0
   # Multiplier over measured background noise to count as speech
   vad_sensitivity: 3.0
   chime: true
@@ -98,10 +124,11 @@ stt:
   model: small.en
   device: cpu        # keep on CPU so the LLM gets all the VRAM
   compute_type: int8
-  # Fast engine for clear speech: Moonshine (~0.2 s vs ~1.8 s for Whisper). Recordings with a
-  # signal-to-noise below fast_min_snr_db (quiet voice, noisy room) still go to Whisper,
-  # which is far more accurate there. Remove fast_model_dir to always use Whisper.
-  fast_model_dir: models/stt/sherpa-onnx-moonshine-base-en-int8
+  # Words to expect; helps Whisper with commands and app/site names (quiet speech: 24% -> 19% errors)
+  prompt: "Voice commands to an assistant called Max: open YouTube, search for, close this tab, play the video, volume, Spotify, Chrome, Google."
+  # Optional fast engine for clear speech: Moonshine (~0.2 s vs ~1.8 s for Whisper), downloaded by
+  # setup.ps1. Off by default: it misheard Manas's voice far more than Whisper does. Uncomment to try.
+  # fast_model_dir: models/stt/sherpa-onnx-moonshine-base-en-int8
   fast_min_snr_db: 12
 
 tts:
