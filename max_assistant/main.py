@@ -170,24 +170,38 @@ def run_wake_test(cfg):
 
 
 def run_voice(cfg, verbose: bool):
-    from .audio import Microphone, NoiseFloor, chime, record_utterance, rms
+    from .audio import Microphone, NoiseFloor, chime, rms
+    from .listen import listen_for_command
+    from .diagnostics import Heartbeat, foreground_window
     from .stt import SpeechToText
     from .tts import Speaker
 
     a = cfg.audio
     print("Loading speech models (first run downloads them)...")
     mic = Microphone(a.sample_rate, a.input_device)
-    stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type)
+    stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
+                       cfg.stt.get("fast_model_dir"), cfg.stt.get("fast_min_snr_db", 12.0))
     speaker = Speaker(cfg.tts.engine, cfg.tts.piper_voice, cfg.tts.speed, a.output_device, mic=mic)
     wake = make_wake_detector(cfg)
     noise = NoiseFloor()
 
-    def listen(timeout: float) -> str:
-        if a.chime:
+    beat = Heartbeat(mic)
+
+    def ring():
+        mic.muted.set()           # don't record our own beep (it would count as speech)
+        try:
             chime("wake", a.output_device)
-        mic.flush()
-        audio = record_utterance(mic, noise, a.vad_sensitivity, a.silence_s, timeout, a.max_record_s)
-        return stt.transcribe(audio) if audio is not None else ""
+        finally:
+            mic.muted.clear()
+
+    def listen(timeout: float) -> str:
+        # No mic.flush() here: audio right after "Hey Max" is kept, so "Hey Max, open
+        # YouTube" works in one breath. (Speaker.say already drops Max's own voice.)
+        if a.chime:
+            threading.Thread(target=ring, daemon=True).start()
+        beat.set("listening to command")
+        return listen_for_command(mic, noise, stt.transcribe, a.vad_sensitivity, a.silence_s, timeout,
+                                  a.max_record_s, a.get("early_s", 0.4), a.get("max_silence_s", 1.8))
 
     def confirm(prompt: str) -> bool:
         say(prompt + " Say yes or no.")
@@ -200,6 +214,10 @@ def run_voice(cfg, verbose: bool):
     def say(text: str):
         with speak_lock:          # one voice at a time: a filler never overlaps the answer
             speaker.say(text)
+
+    def say_main(text: str):      # the main loop's own speech, tracked by the heartbeat
+        beat.set("speaking")
+        say(text)
 
     printer = event_printer(verbose)
     turn = {"filler": False}
@@ -218,11 +236,18 @@ def run_voice(cfg, verbose: bool):
     if models_ok:
         threading.Thread(target=llm.preload, args=(cfg.llm.fast_model,), daemon=True).start()
 
+    from .winutil import keep_awake_in_background
+
+    tweaks = keep_awake_in_background()
+    if tweaks:
+        log.info("background listening: %s", ", ".join(tweaks))
     mic.start()
+    beat.start()
     print(f"\n✅ Ready. Say \"{wake.phrase}\". Press Ctrl+C to quit.\n")
-    say(f"{cfg.assistant.name} online.")
+    say_main(f"{cfg.assistant.name} online.")
 
     try:
+        beat.set("waiting for wake word")
         while True:
             frame = mic.read(timeout=1.0)
             if frame is None:
@@ -232,6 +257,7 @@ def run_voice(cfg, verbose: bool):
                     noise.update(frame)  # learn the room's background noise while idle
                 continue
 
+            log.info("front window at wake: %s", foreground_window())
             print("👂 Listening...")
             text = listen(a.no_speech_timeout_s)
             if not text:
@@ -239,18 +265,21 @@ def run_voice(cfg, verbose: bool):
                     chime("done", a.output_device)
                 print("   (didn't catch anything)")
             elif text.lower().strip(" .!?") in CANCEL_PHRASES:
-                say("Okay.")
+                say_main("Okay.")
             else:
                 print(f"🗣  you: {text}")
                 ctx.models_asleep = False
+                beat.set("thinking")
                 answer = agent.handle(text)
                 print(f"🤖 {cfg.assistant.name.lower()}: {answer}\n")
-                say(answer)
+                say_main(answer)
             wake.reset()
             mic.flush()
+            beat.set("waiting for wake word")
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
+        beat.stop()
         mic.stop()
 
 
@@ -270,6 +299,11 @@ def main(argv=None):
         return
 
     cfg = load_config(args.config)
+    if not args.text:
+        # Before logging binds to stdout: a stalled console must never freeze the listener
+        from .winutil import unblock_console
+
+        unblock_console()
     setup_logging(cfg, args.verbose)
     if args.wake_test:
         run_wake_test(cfg)

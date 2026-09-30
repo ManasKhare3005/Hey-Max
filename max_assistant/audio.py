@@ -21,6 +21,10 @@ class Microphone:
         self.sample_rate = sample_rate
         self._q: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self.muted = threading.Event()
+        self.dropped = 0     # frames lost because the listener fell behind
+        self.frames_in = 0   # frames delivered by the driver, muted or not (for diagnostics)
+        self._sq_sum = 0.0   # running sum of mean-square levels, for the heartbeat
+        self._sq_n = 0
         self._stream = sd.InputStream(
             samplerate=sample_rate,
             channels=1,
@@ -33,12 +37,16 @@ class Microphone:
     def _callback(self, indata, frames, t, status):
         if status:
             log.debug("mic status: %s", status)
+        self.frames_in += 1
+        x = indata[:, 0].astype(np.float32)
+        self._sq_sum += float(np.mean(x * x))
+        self._sq_n += 1
         if self.muted.is_set():
             return
         try:
             self._q.put_nowait(indata[:, 0].copy())
         except queue.Full:
-            pass  # drop frames rather than block the audio thread
+            self.dropped += 1  # drop frames rather than block the audio thread
 
     def start(self):
         self._stream.start()
@@ -52,6 +60,19 @@ class Microphone:
             return self._q.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def take_level_dbfs(self) -> float:
+        """Average input level since the last call (dBFS; about -60 is a quiet room)."""
+        from .diagnostics import dbfs
+
+        n, total = self._sq_n, self._sq_sum
+        self._sq_n, self._sq_sum = 0, 0.0
+        return dbfs(total / n) if n else -120.0
+
+    @property
+    def backlog(self) -> int:
+        """80 ms frames waiting to be processed; more than a few means we're falling behind."""
+        return self._q.qsize()
 
     def flush(self):
         while not self._q.empty():

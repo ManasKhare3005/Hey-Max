@@ -93,6 +93,15 @@ if (-not (Test-Path (Join-Path $kwsDir "tokens.txt"))) {
 }
 & $venvPy -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')"
 Check "Downloading the Whisper model"
+$moonName = "sherpa-onnx-moonshine-base-en-int8"
+$moonDir = Join-Path $PSScriptRoot "models\stt\$moonName"
+if (-not (Test-Path (Join-Path $moonDir "tokens.txt"))) {
+    $moonArchive = Join-Path $env:TEMP "$moonName.tar.bz2"
+    Invoke-WebRequest "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$moonName.tar.bz2" -OutFile $moonArchive
+    New-Item -ItemType Directory -Force -Path (Split-Path $moonDir) | Out-Null
+    tar -xjf $moonArchive -C (Split-Path $moonDir); Check "Extracting the fast speech model"
+    Remove-Item $moonArchive
+}
 
 # 4b. Private web search (SearXNG in Docker) -------------------------------------
 Step "Setting up private web search (SearXNG)"

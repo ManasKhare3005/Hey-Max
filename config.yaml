@@ -41,15 +41,16 @@ wake_word:
   cooldown_s: 1.0
   sherpa:
     model_dir: models/kws/gigaspeech-3.3M
-    # 0..1, raise if it triggers by accident, lower if it misses you
-    threshold: 0.25
+    # 0..1, raise if it triggers by accident, lower if it misses you. Tuned 2026-09-29 for quiet
+    # speech (0.12 + boost 2 + gain 16: best recall, still 0 false triggers on near-miss phrases)
+    threshold: 0.12
     # How strongly decoding favours the phrase; raise a little if it misses you
-    boost: 1.0
+    boost: 2.0
     # Parallel decoders offset in time so the phrase is caught wherever it falls
     # (1 stream misses ~1 in 5 calls). ~3% of one CPU core each.
     streams: 4
     # Boost quiet speech up to this factor (1 = off). Loud speech is never changed.
-    max_gain: 8.0
+    max_gain: 16.0
   openwakeword:
     # Built-in name (hey_jarvis, alexa, hey_mycroft) or a custom .onnx path
     model: hey_jarvis
@@ -80,6 +81,11 @@ audio:
   output_device: null
   # Stop recording after this much silence once you start talking
   silence_s: 1.0
+  # Start transcribing after this much silence; if the words look like a finished request,
+  # answer right away instead of waiting the full silence_s
+  early_s: 0.4
+  # If you trail off mid-sentence ("search for..."), wait up to this long for the rest
+  max_silence_s: 1.8
   # Give up if you say nothing for this long after the wake word
   no_speech_timeout_s: 5.0
   max_record_s: 15.0
@@ -92,6 +98,11 @@ stt:
   model: small.en
   device: cpu        # keep on CPU so the LLM gets all the VRAM
   compute_type: int8
+  # Fast engine for clear speech: Moonshine (~0.2 s vs ~1.8 s for Whisper). Recordings with a
+  # signal-to-noise below fast_min_snr_db (quiet voice, noisy room) still go to Whisper,
+  # which is far more accurate there. Remove fast_model_dir to always use Whisper.
+  fast_model_dir: models/stt/sherpa-onnx-moonshine-base-en-int8
+  fast_min_snr_db: 12
 
 tts:
   engine: piper      # piper (natural, offline) or sapi (built-in Windows voice fallback)

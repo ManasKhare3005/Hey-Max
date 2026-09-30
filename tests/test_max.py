@@ -639,3 +639,124 @@ def test_open_website_site_search(tmp_path, monkeypatch):
     assert reg.run("open_website", {"target": "Beatles", "site": "youtube"}) == "Searching YouTube for Beatles."
     reg.run("open_website", {"target": "usb c hub", "site": "amazon.com"})
     assert opened == ["https://www.youtube.com/results?search_query=Beatles", "https://www.amazon.com/s?k=usb+c+hub"]
+
+
+def test_background_writer_never_blocks_the_caller():
+    import threading
+    import time
+
+    from max_assistant.winutil import BackgroundWriter
+
+    class StalledConsole:
+        """Like a console in 'Select' mode: writes block until released."""
+        def __init__(self):
+            self.release, self.written = threading.Event(), []
+
+        def write(self, text):
+            self.release.wait()
+            self.written.append(text)
+
+        def flush(self):
+            pass
+
+    console = StalledConsole()
+    out = BackgroundWriter(console, max_items=10)
+    start = time.perf_counter()
+    for i in range(50):
+        print(f"line {i}", file=out)       # would hang forever if written directly
+    assert time.perf_counter() - start < 0.5
+    console.release.set()
+    for _ in range(50):
+        if console.written:
+            break
+        time.sleep(0.02)
+    assert console.written and console.written[0] == "line 0"
+
+
+# ---------- listening ----------
+
+def test_looks_complete_and_strip_wake_word():
+    from max_assistant.listen import looks_complete, strip_wake_word
+
+    assert looks_complete("Open YouTube.") and looks_complete("What time is it?")
+    assert not looks_complete("Can you search for...") and not looks_complete("Search for")
+    assert not looks_complete("open the") and not looks_complete("")
+    assert strip_wake_word("Max, open YouTube.") == "open YouTube."
+    assert strip_wake_word("Hey Max what time is it") == "what time is it"
+    assert strip_wake_word("Maxwell's equations") == "Maxwell's equations"
+
+
+def speech(n, amp=5000):
+    return [tone(amp)] * n
+
+
+def test_listen_answers_early_when_the_request_is_complete():
+    from max_assistant.listen import listen_for_command
+
+    calls = []
+
+    def transcribe(audio):
+        calls.append(len(audio))
+        return "Open YouTube."
+
+    frames = speech(10) + [tone(10)] * 40            # 0.8 s speech, then 3.2 s of silence
+    mic = FakeMic(frames)
+    assert listen_for_command(mic, NoiseFloor(100), transcribe, silence_s=1.0, early_s=0.4) == "Open YouTube."
+    used = 50 - len(mic.frames)
+    assert used < 10 + 12 + 4                        # returned at ~0.4-0.5 s of silence, not 1.0 s
+
+
+def test_listen_waits_when_the_sentence_trails_off():
+    from max_assistant.listen import listen_for_command
+
+    replies = iter(["Can you search for...", "Can you search for arctic monkeys?", "Can you search for arctic monkeys?"])
+    frames = speech(10) + [tone(10)] * 15 + speech(8) + [tone(10)] * 40   # 1.2 s pause mid-sentence
+    mic = FakeMic(frames)
+    text = listen_for_command(mic, NoiseFloor(100), lambda a: next(replies), silence_s=1.0, early_s=0.4,
+                              max_silence_s=1.8)
+    assert text == "Can you search for arctic monkeys?"   # didn't cut off at the pause
+
+
+def test_listen_keeps_words_said_right_after_wake():
+    from max_assistant.listen import listen_for_command
+
+    got = []
+    frames = speech(6) + [tone(10)] * 30             # talking immediately, no pause for the chime
+    listen_for_command(FakeMic(frames), NoiseFloor(100), lambda a: got.append(a) or "Open Spotify.")
+    assert got and len(got[0]) >= 6 * FRAME          # all the speech frames were transcribed
+
+
+def test_stt_routes_clear_speech_to_fast_engine_and_quiet_to_whisper():
+    from max_assistant.stt import SpeechToText, snr_db
+
+    rng = np.random.default_rng(0)
+    noise = lambda n, db: rng.normal(0, 10 ** (db / 20), n)
+    tone_ = lambda n, db: np.sin(np.arange(n) / 5) * 10 ** (db / 20)
+    clear = np.concatenate([noise(8000, -60), tone_(16000, -6) + noise(16000, -60), noise(8000, -60)]).astype(np.float32)
+    murky = np.concatenate([noise(8000, -40), tone_(16000, -38) + noise(16000, -40), noise(8000, -40)]).astype(np.float32)
+    assert snr_db(clear) > 40 and snr_db(murky) < 12
+
+    stt = SpeechToText.__new__(SpeechToText)       # skip loading real models
+    used = []
+    stt.fast = type("F", (), {"transcribe": lambda self, a: used.append("fast") or "Open YouTube."})()
+    stt.fast_min_snr_db = 12.0
+    stt.whisper = lambda a: used.append("whisper") or "open youtube"
+    assert stt.transcribe(clear) == "Open YouTube." and used == ["fast"]
+    assert stt.transcribe(murky) == "open youtube" and used == ["fast", "whisper"]
+    stt.fast = type("F", (), {"transcribe": lambda self, a: ""})()   # fast engine heard nothing
+    assert stt.transcribe(clear) == "open youtube"                   # -> Whisper double-checks
+
+
+def test_listen_retranscribes_everything_when_it_still_sounds_unfinished():
+    from max_assistant.listen import listen_for_command
+
+    seen = []
+
+    def transcribe(audio):
+        seen.append(len(audio))
+        return "search for arctic monkeys on..." if len(seen) == 1 else "search for arctic monkeys on YouTube"
+
+    frames = speech(10) + [tone(10)] * 40
+    text = listen_for_command(FakeMic(frames), NoiseFloor(100), transcribe, silence_s=1.0, early_s=0.4, max_silence_s=1.8)
+    assert text == "search for arctic monkeys on YouTube"
+    assert len(seen) == 2 and seen[1] > seen[0]      # second pass covered the quiet tail too

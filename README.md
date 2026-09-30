@@ -43,6 +43,7 @@ Say **"Hey Max"** and it listens, thinks with a local LLM, runs tools on your la
 | `.\run.bat --text` | Type instead of talking. Great for testing without a mic. |
 | `.\run.bat -v` | Voice mode with detailed logs in the console. |
 | `.\run.bat --list-devices` | Show mic/speaker IDs to put in `config.yaml`. |
+| `start_max.bat` (double-click) | Voice mode in its own minimized window. Best for everyday use. |
 
 Make sure the **Ollama app is running** (it starts with Windows after install).
 
@@ -73,7 +74,8 @@ In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete a
 - **False triggers / misses:** `wake_word.sherpa.threshold` (raise to trigger less, lower if it misses you). Check with `--wake-test`.
 - **Cuts you off mid-sentence:** raise `audio.silence_s` to 1.5.
 - **Doesn't notice you talking:** lower `audio.vad_sensitivity` to 2.0.
-- **Better transcription:** `stt.model: medium.en` (slower). **Faster:** `base.en`.
+- **Speech-to-text speed:** clear recordings go to Moonshine (~0.2 s), quiet or noisy ones to Whisper small.en (~1.8 s, much more accurate there); the split is `stt.fast_min_snr_db`. Transcription starts after 0.4 s of silence (`audio.early_s`) and Max answers right away if the sentence sounds finished; if you trail off ("search for…") it waits up to `audio.max_silence_s`. You can say "Hey Max, open YouTube" in one breath.
+- **Quiet voice not waking it:** the wake word is tuned for quiet speech already (`wake_word.sherpa`). What limits it is your voice vs. room noise, which gain can't fix. Turn up the mic in Windows sound settings, get closer to the mic, or turn on your mic's noise suppression ("Voice Clarity" / audio enhancements) in Windows.
 - **Different LLMs:** any Ollama model with tool support, e.g. `llama3.2:3b` or `qwen2.5:7b`. Pull it with `ollama pull <name>`.
 - **GPU memory:** `llm.keep_alive` sets how long a model stays loaded after use.
 - **Add app shortcuts:** add `spoken name: command` under `apps:`. Apps not listed are found automatically via the Start Menu.
@@ -105,6 +107,7 @@ It uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) open-vocabulary key
 - **"Can't reach Ollama"** — open the Ollama app, or run `ollama serve`.
 - **"Model isn't downloaded"** — run the `ollama pull` command it prints.
 - **No wake detection** — run `--list-devices`, set `audio.input_device` to your mic's number; check Windows Settings → Privacy → Microphone allows desktop apps.
+- **Stops responding when its window isn't in front / after clicking in its window** — fixed: a program printing to a console freezes when the console stops reading (clicking into a Command Prompt starts "Select" mode; editor terminals like VS Code's pause when inactive). Max now writes console output from a background thread and turns off click-to-select. Every 30 s it logs a heartbeat to `logs/max.log` (stage, mic frames, level, front window); if it's stuck, thread stacks go to `logs/stacks.log`.
 - **Robotic voice** — Piper voice file is missing, so it fell back to the Windows voice; re-run `setup.ps1`.
 - **Slow first answer** — the model is loading into VRAM; later answers are faster. Close GPU-heavy apps (games, NVIDIA overlay) to help.
 - Logs are in `logs/max.log`.
