@@ -7,6 +7,7 @@ import re
 import time
 from typing import Callable
 
+from .events import current_origin
 from .llm import OllamaClient, OllamaError
 from .tools.registry import DECLINED, ForLLM, ToolRegistry
 
@@ -57,6 +58,9 @@ CLAIMS = {
     "cancel_reminder": re.compile(r"\bcancel(l?ed)?\b.*\bremind|\bremind\w*\b.*\bcancel(l?ed)?\b", re.I),
     "set_reminder": re.compile(r"\bi('ll| will) remind you\b", re.I),
     "remember": re.compile(r"\bi('ll| will) remember\b|\b(saved|noted) that\b", re.I),
+    # "I'll open a search for cute dog photos" after a failed tool call: nothing was opened
+    "open_website": re.compile(r"\bi('ll| will| am going to|'m going to) (open|search|pull up|bring up|show)\b|"
+                               r"\b(i('ve| have) )?(opened|pulled up)\b|^\W*(opening|searching|pulling up)\b", re.I),
 }
 # Clear requests for those actions; if the reply neither used the tool nor asked a question, nudge
 INTENTS = {
@@ -64,7 +68,15 @@ INTENTS = {
     "cancel_reminder": re.compile(r"\b(cancel|delete|remove)\b.*\breminder\b", re.I),
     "set_reminder": re.compile(r"\bremind me\b", re.I),
     "remember": re.compile(r"^\W*(please\s+|can you\s+)*remember\s+(that|my|this)\b", re.I),
+    "open_website": re.compile(r"\b(show|open|pull up|bring up|search|look up|find|google)\b.*"
+                               r"\b(photos?|pictures?|pics?|images?|wallpapers?|website|site|web ?page)\b", re.I),
 }
+# Max's Chrome window is on the laptop: from the phone, pages are opened on the phone instead
+PHONE_NOTE = ("(Sent from the user's phone. Websites, searches and videos: open_website, which opens them on the phone "
+              "(e.g. 'open youtube' = open_website youtube.com; 'play lofi on youtube' = open_website target 'lofi' site 'youtube'). "
+              "open_app only for apps on the laptop the user names.)")
+PHONE_BROWSER = ("The user is on their phone and can't see the laptop's browser. To show them a page, a search or "
+                 "images, call open_website: it opens on their phone.")
 # "forget ..." goes straight to the forget tool: the model was unreliable here, and forgetting
 # always asks the user to confirm, so a wrong match is harmless
 FORGET = re.compile(r"^\W*(?:please\s+|can you\s+|could you\s+|max,?\s+)*forget\s+"
@@ -182,6 +194,8 @@ class Agent:
         if memories:
             # In the user message, not the system prompt, so the cached prompt prefix still matches
             content += f"\n(You remember: {memories})"
+        if current_origin() == "phone":
+            content += f"\n{PHONE_NOTE}"
         user_msg = {"role": "user", "content": content}
         messages = [self._system(), *self._recent_history(), user_msg]
         turn_start = len(messages) - 1
@@ -295,6 +309,10 @@ class Agent:
         tool = self.registry.get(name)
         if tool is None:
             return f"Error: there is no tool named {name}."
+
+        if name.startswith("browser_") and current_origin() == "phone":
+            log.info("tool %s skipped: phone command", name)
+            return ForLLM(PHONE_BROWSER)
 
         if tool.risky and self.confirm_risky:
             prompt = tool.confirmation_prompt(args or {})

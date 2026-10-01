@@ -196,7 +196,16 @@ def register(reg: ToolRegistry):
         direct=True,
     )
     def open_website(target: str, section: str = "all", site: str = "", ctx=None):
+        from ..events import current_origin
+
+        on_phone = current_origin() == "phone"
+
         def show(url: str):
+            # Asked from the phone: open it there (the phone app gets this event over its WebSocket)
+            bus = getattr(ctx, "bus", None)
+            if on_phone and bus is not None:
+                bus.publish("phone_open", {"url": url, "title": target})
+                return
             # Max's own Chrome window when available, so later clicks/typing work on the page
             browser = getattr(ctx, "browser", None)
             if browser is not None:
@@ -211,16 +220,17 @@ def register(reg: ToolRegistry):
         if re.match(r"^(https?://)?[\w-]+(\.[\w-]+)+(/\S*)?$", t):
             show(t if t.startswith("http") else f"https://{t}")
             site = re.sub(r"^https?://(www\.)?", "", t).rstrip("/")
-            return f"Opened {site}."   # spoken, so no "https colon slash slash"
+            return f"Opening {site} on your phone." if on_phone else f"Opened {site}."   # spoken: no "https colon"
         if site and (url := site_search_url(site, t)):
             show(url)
             name = {"youtube": "YouTube", "github": "GitHub", "ebay": "eBay"}.get(site.lower(), site.title())
-            return f"Searching {name} for {t}."
+            return f"Searching {name} for {t}" + (" on your phone." if on_phone else ".")
         section = section if section in GOOGLE_SECTIONS else "all"
         show(google_url(t, section))
+        where = " on your phone" if on_phone else ""
         if section == "all":
-            return f"Searching Google for {t}."
-        return f"Here are Google {section.title()} results for {t}."
+            return f"Searching Google for {t}{where}."
+        return f"Here are Google {section.title()} results for {t}{where}."
 
     @reg.tool(
         "Media keys for music apps like Spotify: play/pause, next, previous, stop. For a video on a web page in Max's browser (YouTube etc.), use browser_media instead.",

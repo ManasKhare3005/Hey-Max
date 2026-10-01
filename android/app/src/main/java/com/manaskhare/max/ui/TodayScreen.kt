@@ -1,6 +1,10 @@
 package com.manaskhare.max.ui
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,9 +48,11 @@ fun TodayScreen(vm: MainViewModel) {
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
-            Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Title("Today")
-                Spacer(Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth().padding(start = 10.dp, top = 22.dp), verticalAlignment = Alignment.Bottom) {
+                Column(Modifier.weight(1f)) {
+                    Label(java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("EEEE · MMMM d")), color = Accent0)
+                    Text("Today", style = DisplayStyle, color = Text1, fontSize = 48.sp, lineHeight = 52.sp)
+                }
                 GhostButton("Refresh") { rev++ }
             }
         }
@@ -55,9 +61,9 @@ fun TodayScreen(vm: MainViewModel) {
             item { Text("Loading…", color = Text2) }
         } else {
             if (t.str("canvas_error").isNotBlank()) item { Text("Canvas: ${t.str("canvas_error")}", color = Amber, fontSize = 13.sp) }
-            item { Section("Due today", t.optJSONArray("due_today")?.objects().orEmpty(), "Nothing due today 🎉") }
-            item { Section("Due soon", t.optJSONArray("due_soon")?.objects().orEmpty(), "Nothing in the next few days") }
-            item { Section("Classes", t.optJSONArray("classes")?.objects().orEmpty(), "No classes today") }
+            item { DueSection("Due today", t.optJSONArray("due_today")?.objects().orEmpty(), "Nothing due today", highlight = true) }
+            item { DueSection("Due soon", t.optJSONArray("due_soon")?.objects().orEmpty(), "Nothing in the next few days") }
+            item { DueSection("Classes", t.optJSONArray("classes")?.objects().orEmpty(), "No classes today") }
             item {
                 Card {
                     Label("Reminders")
@@ -96,14 +102,20 @@ fun TodayScreen(vm: MainViewModel) {
 }
 
 @Composable
-private fun Section(title: String, items: List<JSONObject>, empty: String) {
-    Card {
-        Label(title)
+private fun DueSection(title: String, items: List<JSONObject>, empty: String, highlight: Boolean = false) {
+    val hot = highlight && items.isNotEmpty()
+    Card(if (hot) Modifier.border(1.dp, Accent0.copy(alpha = 0.45f), RoundedCornerShape(20.dp)) else Modifier) {
+        Label(title, color = if (hot) Accent0 else Text2)
         if (items.isEmpty()) Text(empty, color = Text2, modifier = Modifier.padding(top = 6.dp))
         items.forEach { i ->
-            Column(Modifier.padding(vertical = 6.dp)) {
-                Text(i.str("title"), color = Text1, fontSize = 15.sp)
-                Label(listOf(i.str("course"), i.str("when")).filter { it.isNotBlank() }.joinToString(" · "))
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(i.str("title"), style = if (hot) DisplayStyle else TextStyle.Default, color = Text1,
+                         fontSize = if (hot) 24.sp else 16.sp, fontWeight = if (hot) null else FontWeight.SemiBold)
+                    if (i.str("course").isNotBlank()) Text(i.str("course"), color = Text2, fontSize = 13.sp)
+                }
+                if (i.str("when").isNotBlank()) Text(i.str("when"), style = DisplayStyle, color = Accent0, fontSize = 18.sp,
+                                                     fontStyle = FontStyle.Italic, modifier = Modifier.padding(start = 12.dp))
             }
         }
     }

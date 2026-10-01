@@ -16,6 +16,8 @@ object Hub {
     val stage = MutableStateFlow("")
     val approvals = MutableStateFlow<List<PendingApproval>>(emptyList())
     val events = MutableSharedFlow<MaxEvent>(extraBufferCapacity = 64)
+    /** Activities currently on screen (counted in MaxApp). Links open straight away only when > 0. */
+    @Volatile var visible = 0
 
     fun addApproval(a: PendingApproval) = approvals.update { list -> list.filter { it.id != a.id } + a }
     fun removeApproval(id: Int) = approvals.update { list -> list.filter { it.id != id } }

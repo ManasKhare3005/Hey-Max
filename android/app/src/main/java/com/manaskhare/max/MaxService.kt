@@ -151,11 +151,27 @@ class MaxService : Service() {
                 "saved" -> notify(MaxApp.CH_UPDATE, "Notes ready", data.optString("title"))
                 "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
             }
+            "phone_open" -> openLink(data.optString("url"), data.optString("title"))
             "digest" -> if (data.optString("error").isNotBlank()) {
                 notify(MaxApp.CH_UPDATE, "Daily digest not sent", data.optString("error"))
             }
         }
         Hub.events.tryEmit(MaxEvent(kind, data))
+    }
+
+    /** "Show me cute dog photos" from the phone: open the page here, or offer it as a notification. */
+    private fun openLink(url: String, title: String) {
+        val uri = runCatching { android.net.Uri.parse(url) }.getOrNull() ?: return
+        if (uri.scheme != "https" && uri.scheme != "http") return
+        val view = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Hub.visible > 0 && runCatching { startActivity(view) }.isSuccess) return
+        nm.notify(nextId++, NotificationCompat.Builder(this, MaxApp.CH_UPDATE)
+            .setSmallIcon(R.drawable.ic_stat_max)
+            .setContentTitle("Max found it")
+            .setContentText(title.ifBlank { uri.host ?: url } + " · tap to open")
+            .setAutoCancel(true)
+            .setContentIntent(PendingIntent.getActivity(this, nextId, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            .build())
     }
 
     private fun openApp(): PendingIntent = PendingIntent.getActivity(

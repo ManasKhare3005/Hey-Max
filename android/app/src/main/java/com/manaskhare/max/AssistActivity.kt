@@ -53,7 +53,10 @@ import com.manaskhare.max.ui.Label
 import com.manaskhare.max.ui.Line
 import com.manaskhare.max.ui.MaxTheme
 import com.manaskhare.max.ui.Navy
-import com.manaskhare.max.ui.Orb
+import com.manaskhare.max.ui.Centrepiece
+import com.manaskhare.max.ui.DisplayStyle
+import com.manaskhare.max.ui.LocalLook
+import com.manaskhare.max.ui.highlighted
 import com.manaskhare.max.ui.Panel
 import com.manaskhare.max.ui.Red
 import com.manaskhare.max.ui.Text1
@@ -145,7 +148,8 @@ private fun Sheet(vm: MainViewModel, onClose: () -> Unit, openApp: () -> Unit) {
         ) {
             Box(Modifier.size(width = 36.dp, height = 4.dp).background(Line, RoundedCornerShape(2.dp)))
             Spacer(Modifier.height(4.dp))
-            Orb(phase, level, Modifier.size(150.dp))
+            if (LocalLook.current.piece != com.manaskhare.max.ui.Centrepiece.WORDS) Centrepiece(phase, level, Modifier.size(170.dp))
+            else Spacer(Modifier.height(12.dp))
             Label(when (phase) {
                 Phase.IDLE -> if (approvals.isNotEmpty()) "needs your ok" else "tap to talk"
                 Phase.LISTENING -> "listening…"
@@ -156,7 +160,7 @@ private fun Sheet(vm: MainViewModel, onClose: () -> Unit, openApp: () -> Unit) {
             if (heard.isNotBlank()) Text("“$heard”", color = Text2, fontSize = 15.sp, textAlign = TextAlign.Center)
             if (reply.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(reply, color = Text1, fontSize = 17.sp, lineHeight = 23.sp, textAlign = TextAlign.Center)
+                Text(highlighted(reply), style = DisplayStyle, color = Text1, fontSize = 24.sp, lineHeight = 28.sp, textAlign = TextAlign.Center)
             }
             if (error.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))

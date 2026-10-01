@@ -1511,3 +1511,54 @@ def test_config_has_no_duplicate_keys():
     Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
     cfg = yaml.load((ROOT / "config.yaml").read_text(encoding="utf-8"), Loader=Strict)
     assert cfg["notes"]["file"] and cfg["notes"]["live_model"]
+
+
+# ---------- commands from the phone open things on the phone ----------
+
+def test_phone_searches_open_on_the_phone_not_the_laptop(tmp_path, monkeypatch):
+    from max_assistant.events import EventBus, set_origin
+
+    opened = []
+    monkeypatch.setattr(system_tools.webbrowser, "open", opened.append)
+    reg = make_registry(tmp_path)
+    reg.context.bus = EventBus()
+    set_origin("phone")
+    try:
+        out = reg.run("open_website", {"target": "cute dog photos", "section": "images"})
+    finally:
+        set_origin("local")
+    assert out == "Here are Google Images results for cute dog photos on your phone."
+    assert opened == []                                                       # laptop untouched
+    ev = reg.context.bus.recent[-1]
+    assert ev["kind"] == "phone_open" and ev["data"]["url"] == "https://www.google.com/search?q=cute+dog+photos&udm=2"
+    assert reg.run("open_website", {"target": "youtube.com"}) == "Opened youtube.com."   # laptop commands unchanged
+    assert opened == ["https://youtube.com"]
+
+
+def test_phone_command_redirects_laptop_browser_tools_and_fixes_empty_promises(tmp_path, monkeypatch):
+    """The real failure: from the phone Max called browser_tabs (no page open), then said
+    "I'll open a search for cute dog photos" without opening anything."""
+    from max_assistant.events import EventBus, set_origin
+
+    monkeypatch.setattr(system_tools.webbrowser, "open", lambda url: None)
+    reg = make_registry(tmp_path)
+    reg.context.bus = EventBus()
+
+    @reg.tool("List or switch the browser's tabs.", params={})
+    def browser_tabs():
+        raise AssertionError("must not touch the laptop's browser for a phone command")
+
+    llm = FakeLLM([ChatReply("", [ToolCall("browser_tabs", {})]),
+                   ChatReply("I'll open a search for cute dog photos right away."),        # empty promise
+                   ChatReply("", [ToolCall("open_website", {"target": "cute dog photos", "section": "images"})]),
+                   ChatReply("Here are cute dog photos on your phone.")])     # "search ... and show me" = two steps
+    agent = Agent(llm, reg, "fast", "planner")
+    set_origin("phone")
+    try:
+        answer = agent.handle("can you search for some cute dog photos and show me?")
+    finally:
+        set_origin("local")
+    assert "on your phone" in answer
+    assert "can't see the laptop's browser" in llm.calls[1]["messages"][-1]["content"]
+    assert "System check" in llm.calls[2]["messages"][-1]["content"]
+    assert reg.context.bus.recent[-1]["kind"] == "phone_open"

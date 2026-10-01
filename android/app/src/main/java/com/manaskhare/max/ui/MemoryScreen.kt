@@ -51,7 +51,7 @@ fun MemoryScreen(vm: MainViewModel) {
     openNote?.let { NoteDetail(vm, it) { openNote = null }; return }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Title("Memory")
+        Row(Modifier.padding(start = 10.dp, top = 22.dp)) { Title("Memory") }
         Spacer(Modifier.height(10.dp))
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             listOf("Facts", "Notes").forEachIndexed { i, label ->
@@ -122,10 +122,12 @@ private fun Notes(vm: MainViewModel, open: (JSONObject) -> Unit) {
             else -> {
                 Label("record on the laptop")
                 Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    GhostButton("● Lecture (mic)") { vm.call({ it.notesStart("lecture") }) }
-                    GhostButton("● Meeting (laptop audio)") { vm.call({ it.notesStart("meeting") }) }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GhostButton("● Lecture", Modifier.weight(1f)) { vm.call({ it.notesStart("lecture") }) }
+                    GhostButton("● Meeting", Modifier.weight(1f)) { vm.call({ it.notesStart("meeting") }) }
                 }
+                Text("Lecture listens through the laptop mic; meeting records the laptop's audio too.",
+                     color = Text2, fontSize = 12.5.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
     }

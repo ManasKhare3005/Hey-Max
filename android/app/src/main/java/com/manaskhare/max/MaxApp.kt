@@ -10,6 +10,16 @@ import androidx.core.content.ContextCompat
 class MaxApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.manaskhare.max.ui.Looks.load(this)
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(a: android.app.Activity) { Hub.visible++ }
+            override fun onActivityStopped(a: android.app.Activity) { Hub.visible = (Hub.visible - 1).coerceAtLeast(0) }
+            override fun onActivityCreated(a: android.app.Activity, b: android.os.Bundle?) {}
+            override fun onActivityResumed(a: android.app.Activity) {}
+            override fun onActivityPaused(a: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(a: android.app.Activity, b: android.os.Bundle) {}
+            override fun onActivityDestroyed(a: android.app.Activity) {}
+        })
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannels(
             listOf(

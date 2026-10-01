@@ -77,6 +77,7 @@ class Context:
         self.notes = None      # NotesManager (meeting / lecture notes)
         self.stt = None        # SpeechToText, shared with notes (voice mode creates it)
         self.confirm = lambda prompt: False   # spoken yes/no, set by build()
+        self.bus = None        # events.EventBus, set by build()
 
 
 def setup_logging(cfg, verbose: bool):
@@ -100,6 +101,7 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
                        gpu_layers={cfg.llm.fast_model: cfg.llm.get("fast_model_gpu_layers")}
                        if cfg.llm.get("fast_model_gpu_layers") else None)
     ctx = Context(cfg, llm)
+    ctx.bus = bus                              # tools can publish events (e.g. open a link on the phone)
     if approvals is not None:
         local_confirm = confirm
 

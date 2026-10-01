@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
@@ -36,6 +37,15 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.manaskhare.max.ui.AppBackground
 import com.manaskhare.max.ui.ChatScreen
 import com.manaskhare.max.ui.Cyan
 import com.manaskhare.max.ui.Dim
@@ -67,6 +77,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         handleLink(intent)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -78,10 +89,18 @@ class MainActivity : ComponentActivity() {
             MaxTheme {
                 var tab by remember { mutableIntStateOf(if (vm.prefs.paired) 0 else 4) }
                 val approvals by Hub.approvals.collectAsState()
+                AppBackground(glowAt = if (tab == 0) 0.3f else 0.0f) {
                 Scaffold(
-                    containerColor = Navy,
+                    containerColor = Color.Transparent,
                     bottomBar = {
-                        NavigationBar(containerColor = Panel) {
+                        // Frosted, rounded bar floating above the bottom edge
+                        NavigationBar(
+                            containerColor = Color.White.copy(alpha = 0.035f), tonalElevation = 0.dp,
+                            modifier = Modifier.navigationBarsPadding().padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .border(1.dp, Cyan.copy(alpha = 0.16f), RoundedCornerShape(22.dp)),
+                            windowInsets = WindowInsets(0, 0, 0, 0),
+                        ) {
                             listOf(
                                 Triple("Max", Icons.Filled.GraphicEq, 0),
                                 Triple("Chat", Icons.AutoMirrored.Filled.Chat, 1),
@@ -91,9 +110,9 @@ class MainActivity : ComponentActivity() {
                             ).forEach { (label, icon, i) ->
                                 NavigationBarItem(
                                     selected = tab == i, onClick = { tab = i },
-                                    icon = { Icon(icon, contentDescription = label) }, label = { Text(label) },
+                                    icon = { Icon(icon, contentDescription = label) }, label = { Text(label, fontSize = 11.sp) },
                                     colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = Cyan, selectedTextColor = Cyan, indicatorColor = PanelHi,
+                                        selectedIconColor = Cyan, selectedTextColor = Cyan, indicatorColor = Cyan.copy(alpha = 0.12f),
                                         unselectedIconColor = Dim, unselectedTextColor = Dim),
                                 )
                             }
@@ -109,6 +128,7 @@ class MainActivity : ComponentActivity() {
                             else -> SettingsScreen(vm, ::scanQr)
                         }
                     }
+                }
                 }
                 // A risky action is waiting for this phone's OK (also shown as a notification)
                 approvals.firstOrNull()?.let { a ->
