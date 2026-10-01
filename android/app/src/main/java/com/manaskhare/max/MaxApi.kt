@@ -83,6 +83,9 @@ class MaxApi(private val base: String, private val token: String) {
     suspend fun note(id: Int) = JSONObject(get("/api/notes/$id"))
     suspend fun noteSummary(id: Int, refresh: Boolean = false) =
         JSONObject(post("/api/notes/$id/summary" + if (refresh) "?refresh=true" else "")).optString("summary_md")
+    suspend fun phoneResult(id: Int, ok: Boolean, message: String) =
+        post("/api/phone/result", JSONObject().put("id", id).put("ok", ok).put("message", message))
+    suspend fun phoneState(state: JSONObject) = post("/api/phone/state", state)
     suspend fun notesStatus() = JSONObject(get("/api/notes/status"))
     suspend fun notesStart(kind: String) = post("/api/notes/start", JSONObject().put("kind", kind))
     suspend fun notesStop() = post("/api/notes/stop")

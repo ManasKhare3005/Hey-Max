@@ -62,6 +62,12 @@ class Speak(BaseModel):
     text: str
 
 
+class PhoneResult(BaseModel):
+    id: int
+    ok: bool = True
+    message: str = ""
+
+
 class _Cached:
     """Slow status probes (nvidia-smi, SearXNG, Ollama) cached for a few seconds."""
 
@@ -222,6 +228,9 @@ def create_app(rt: Runtime) -> FastAPI:
             return
         await socket.accept()
         q = rt.bus.subscribe(asyncio.get_running_loop())
+        phone = getattr(rt.ctx, "phone", None) if not local(socket) else None
+        if phone is not None:
+            phone.connected(+1)
         try:
             await socket.send_json({"kind": "hello", "data": {"recent": list(rt.bus.recent)[-80:],
                                                               "state": rt.bus.state}})
@@ -231,6 +240,28 @@ def create_app(rt: Runtime) -> FastAPI:
             pass
         finally:
             rt.bus.unsubscribe(q)
+            if phone is not None:
+                phone.connected(-1)
+
+    # ----- the phone carrying out Max's actions (phone.py) -----
+    def bridge():
+        phone = getattr(rt.ctx, "phone", None)
+        if phone is None:
+            raise HTTPException(503, "phone actions are disabled")
+        return phone
+
+    @app.post("/api/phone/result")
+    def phone_result(body: PhoneResult):
+        if not bridge().resolve(body.id, {"ok": body.ok, "message": body.message}):
+            raise HTTPException(404, "no such pending phone action (it may have timed out)")
+        return {"ok": True}
+
+    @app.post("/api/phone/state")
+    async def phone_state(request: Request):
+        state = await request.json()
+        apps = [a for a in state.get("apps", []) if isinstance(a, dict)][:600]
+        bridge().set_state({**state, "apps": apps})
+        return {"ok": True, "apps": len(apps)}
 
     # ----- commands & approvals -----
     @app.post("/api/command")

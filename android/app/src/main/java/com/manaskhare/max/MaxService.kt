@@ -17,6 +17,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
@@ -31,6 +32,7 @@ class MaxService : Service() {
     private var generation = 0                 // ignores callbacks from sockets we've replaced
     private lateinit var nm: NotificationManager
     private val reconnect = Runnable { connect() }
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -71,6 +73,7 @@ class MaxService : Service() {
         socket = null
         Hub.link.value = Link.OFF
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(netCallback) }
+        scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         super.onDestroy()
     }
 
@@ -86,6 +89,8 @@ class MaxService : Service() {
                 backoffMs = 2_000L
                 Hub.link.value = Link.ONLINE
                 nm.notify(LINK_ID, linkNotification("Connected to Max"))
+                // Tell the laptop which apps are installed, so "open Instagram on my phone" works
+                scope.launch { runCatching { api.phoneState(PhoneActions.state(this@MaxService)) } }
             }.let { }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -152,6 +157,14 @@ class MaxService : Service() {
                 "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
             }
             "phone_open" -> openLink(data.optString("url"), data.optString("title"))
+            "phone_action" -> {
+                val api = MaxApi.from(Prefs(this)) ?: return
+                val id = data.optInt("id")
+                scope.launch {
+                    val r = PhoneActions.run(this@MaxService, data.optString("action"), data.optJSONObject("params") ?: JSONObject())
+                    runCatching { api.phoneResult(id, r.ok, r.message) }
+                }
+            }
             "digest" -> if (data.optString("error").isNotBlank()) {
                 notify(MaxApp.CH_UPDATE, "Daily digest not sent", data.optString("error"))
             }

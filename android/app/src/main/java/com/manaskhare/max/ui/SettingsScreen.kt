@@ -1,6 +1,16 @@
 package com.manaskhare.max.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Contacts
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import android.app.StatusBarManager
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
@@ -66,6 +76,7 @@ import com.manaskhare.max.Hub
 import com.manaskhare.max.MainViewModel
 import com.manaskhare.max.MaxTileService
 import com.manaskhare.max.MaxWidget
+import com.manaskhare.max.PhoneActions
 import com.manaskhare.max.R
 
 @SuppressLint("BatteryLife")
@@ -98,6 +109,24 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
         onPauseOrDispose { }
     }
     val toast = { msg: String -> Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
+    val granted = { perm: String -> ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED }
+    var contacts by remember { mutableStateOf(granted(Manifest.permission.READ_CONTACTS)) }
+    var calls by remember { mutableStateOf(granted(Manifest.permission.CALL_PHONE)) }
+    var notifs by remember { mutableStateOf(PhoneActions.notificationAccess(context)) }
+    var overlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    LifecycleResumeEffect(Unit) {
+        contacts = granted(Manifest.permission.READ_CONTACTS); calls = granted(Manifest.permission.CALL_PHONE)
+        notifs = PhoneActions.notificationAccess(context); overlay = Settings.canDrawOverlays(context)
+        onPauseOrDispose { }
+    }
+    val askPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        contacts = granted(Manifest.permission.READ_CONTACTS); calls = granted(Manifest.permission.CALL_PHONE)
+    }
+    val openSettings = { action: String, withPackage: Boolean ->
+        runCatching {
+            context.startActivity(if (withPackage) Intent(action, Uri.parse("package:${context.packageName}")) else Intent(action))
+        }.onFailure { toast("Open your phone's settings and search for Max") }
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
         item { Row(Modifier.padding(start = 10.dp, top = 22.dp)) { Title("Settings") } }
@@ -158,6 +187,31 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
         }
 
         item {
+            Section("Phone powers") {
+                SettingRow("Contacts", Icons.Filled.Contacts,
+                           subtitle = if (contacts) "✓ “Call Mom”, “text Alex” find the right person" else "So Max knows who “Mom” is",
+                           onClick = if (contacts) null else ({ askPermission.launch(Manifest.permission.READ_CONTACTS) }),
+                           trailing = if (contacts) ({ Check() }) else null)
+                RowDivider()
+                SettingRow("Phone calls", Icons.Filled.Call,
+                           subtitle = if (calls) "✓ Calls start after you say yes" else "Without this, Max dials and you tap Call",
+                           onClick = if (calls) null else ({ askPermission.launch(Manifest.permission.CALL_PHONE) }),
+                           trailing = if (calls) ({ Check() }) else null)
+                RowDivider()
+                SettingRow("Notifications", Icons.Filled.NotificationsActive,
+                           subtitle = if (notifs) "✓ “What did I miss?” works (kept in memory only)" else "Lets Max read your recent notifications",
+                           onClick = { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS, false) },
+                           trailing = if (notifs) ({ Check() }) else null)
+                RowDivider()
+                SettingRow("Act while the phone is locked away", Icons.AutoMirrored.Filled.OpenInNew,
+                           subtitle = if (overlay) "✓ Asks from the laptop happen right away"
+                                      else "“Display over other apps”: otherwise you get a tap-to-open notification",
+                           onClick = { openSettings(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, true) },
+                           trailing = if (overlay) ({ Check() }) else null)
+            }
+        }
+
+        item {
             Section("Quick access") {
                 SettingRow("Add Quick Settings tile", Icons.Filled.TouchApp, subtitle = "Pull down the shade, tap Max, talk", onClick = {
                     if (Build.VERSION.SDK_INT >= 33) {
@@ -206,6 +260,9 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
         item { Spacer(Modifier.height(20.dp)) }
     }
 }
+
+@Composable
+private fun Check() = Icon(Icons.Filled.CheckCircle, contentDescription = "On", tint = Accent0)
 
 /** Equal-size tile (icon over a one-line label), three to a row. */
 @Composable

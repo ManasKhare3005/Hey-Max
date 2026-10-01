@@ -43,7 +43,20 @@ class ScreensTest {
     @Test fun home_gold_reactor() { val m = vm(); shot(Look()) { HomeScreen(m) { it() } } }
     @Test fun home_rose_wave() { val m = vm(); shot(Look(accent = Accent.ROSE, piece = Centrepiece.WAVE, font = FontTheme.ELEGANT)) { HomeScreen(m) { it() } } }
     @Test fun home_ice_words() { val m = vm(); shot(Look(accent = Accent.ICE, piece = Centrepiece.WORDS, font = FontTheme.MODERN)) { HomeScreen(m) { it() } } }
-    @Test fun settings() { val m = vm(); shot(Look()) { SettingsScreen(m) {} } }
+    @Test fun settings() {
+        val m = vm()
+        val owner = object : androidx.activity.result.ActivityResultRegistryOwner {   // permission prompts (not shown)
+            override val activityResultRegistry = object : androidx.activity.result.ActivityResultRegistry() {
+                override fun <I, O> onLaunch(requestCode: Int, contract: androidx.activity.result.contract.ActivityResultContract<I, O>,
+                                             input: I, options: androidx.core.app.ActivityOptionsCompat?) {}
+            }
+        }
+        paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_6.copy(screenHeight = 5600))   // whole page
+        shot(Look()) {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.activity.compose.LocalActivityResultRegistryOwner provides owner) { SettingsScreen(m) {} }
+        }
+    }
     @Test fun appearance() { shot(Look(ringBars = true)) { AppearanceScreen {} } }
     @Test fun today() { val m = vm(); shot(Look(accent = Accent.EMERALD, font = FontTheme.TECH)) { TodayScreen(m) } }
 }

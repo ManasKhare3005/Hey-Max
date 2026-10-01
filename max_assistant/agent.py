@@ -72,7 +72,8 @@ INTENTS = {
                                r"\b(photos?|pictures?|pics?|images?|wallpapers?|website|site|web ?page)\b", re.I),
 }
 # Max's Chrome window is on the laptop: from the phone, pages are opened on the phone instead
-PHONE_NOTE = ("(Sent from the user's phone. Websites, searches and videos: open_website, which opens them on the phone "
+PHONE_NOTE = ("(Sent from the user's phone. Apps on the phone: phone_open_app (and the other phone_ tools for calls, "
+              "texts, alarms, maps, music). Websites, searches and videos: open_website, which opens them on the phone "
               "(e.g. 'open youtube' = open_website youtube.com; 'play lofi on youtube' = open_website target 'lofi' site 'youtube'). "
               "open_app only for apps on the laptop the user names.)")
 PHONE_BROWSER = ("The user is on their phone and can't see the laptop's browser. To show them a page, a search or "

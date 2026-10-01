@@ -20,6 +20,7 @@ from .tools import browser as browser_tools
 from .tools import canvas as canvas_tools
 from .tools import digest as digest_tools
 from .tools import notes as notes_tools
+from .tools import phone as phone_tools
 from .tools import memory as memory_tools
 from .tools import web as web_tools
 from .tools.registry import ToolRegistry
@@ -78,6 +79,7 @@ class Context:
         self.stt = None        # SpeechToText, shared with notes (voice mode creates it)
         self.confirm = lambda prompt: False   # spoken yes/no, set by build()
         self.bus = None        # events.EventBus, set by build()
+        self.phone = None      # phone.PhoneBridge: actions on the user's phone
 
 
 def setup_logging(cfg, verbose: bool):
@@ -102,6 +104,10 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
                        if cfg.llm.get("fast_model_gpu_layers") else None)
     ctx = Context(cfg, llm)
     ctx.bus = bus                              # tools can publish events (e.g. open a link on the phone)
+    if bus is not None and (cfg.get("phone", {}) or {}).get("enabled", True):
+        from .phone import PhoneBridge
+
+        ctx.phone = PhoneBridge(bus)            # Max acts on the phone through the phone app
     if approvals is not None:
         local_confirm = confirm
 
@@ -150,6 +156,7 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
     canvas_tools.register(registry)
     digest_tools.register(registry)
     notes_tools.register(registry)
+    phone_tools.register(registry)
     agent = Agent(
         llm, registry,
         fast_model=cfg.llm.fast_model,

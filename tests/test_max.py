@@ -1562,3 +1562,92 @@ def test_phone_command_redirects_laptop_browser_tools_and_fixes_empty_promises(t
     assert "can't see the laptop's browser" in llm.calls[1]["messages"][-1]["content"]
     assert "System check" in llm.calls[2]["messages"][-1]["content"]
     assert reg.context.bus.recent[-1]["kind"] == "phone_open"
+
+
+# ---------- Max acting on the phone (phone.py, tools/phone.py) ----------
+
+def phone_setup(tmp_path, answer=None):
+    """A registry with phone tools and a fake phone that answers every action."""
+    from max_assistant.events import EventBus
+    from max_assistant.phone import PhoneBridge
+    from max_assistant.tools import phone as phone_tools
+
+    bus = EventBus()
+    reg = make_registry(tmp_path)
+    reg.context.phone = bridge = PhoneBridge(bus, timeout=3)
+    phone_tools.register(reg)
+    sent = []
+    if answer is not None:
+        bridge.connected(+1)
+        real_publish = bus.publish
+
+        def publish(kind, data=None):
+            ev = real_publish(kind, data)
+            if kind == "phone_action":
+                sent.append(data)
+                threading.Thread(target=lambda: bridge.resolve(data["id"], answer(data))).start()
+            return ev
+        bus.publish = publish
+    return reg, bridge, sent
+
+
+def test_phone_tools_send_actions_and_speak_the_phones_answer(tmp_path):
+    reg, bridge, sent = phone_setup(tmp_path, lambda d: {"ok": True, "message": f"did {d['action']}"})
+    bridge.set_state({"apps": [{"label": "Instagram", "package": "com.instagram.android"},
+                               {"label": "WhatsApp", "package": "com.whatsapp"}]})
+    assert reg.run("phone_open_app", {"name": "insta"}) == "did open_app"
+    assert sent[-1]["params"] == {"name": "insta", "package": "com.instagram.android"}
+    assert reg.run("phone_timer", {"duration": "an hour and 30 minutes", "label": "pasta"}) == "did timer"
+    assert sent[-1]["params"] == {"seconds": 5400, "label": "pasta"}
+    reg.run("phone_alarm", {"time": "tomorrow at 6:45am"})
+    assert (sent[-1]["params"]["hour"], sent[-1]["params"]["minute"]) == (6, 45)
+    reg.run("phone_message", {"contact": "Mom", "text": "running late", "app": "telegram"})
+    assert sent[-1]["params"] == {"contact": "Mom", "text": "running late", "app": "sms"}
+    reg.run("phone_calendar_add", {"title": "Study group", "when": "tomorrow at 3pm", "duration_minutes": 90})
+    p = sent[-1]["params"]
+    assert p["end"] - p["begin"] == 90 * 60_000
+    assert reg.tools["phone_call"].risky and not reg.tools["phone_message"].risky   # texts: the user taps Send
+    reg.run("phone_notifications", {"app": "all"})
+    assert sent[-1]["params"] == {"app": "", "count": 8}
+
+
+def test_phone_tools_when_the_phone_is_away(tmp_path):
+    from max_assistant.tools.phone import parse_duration
+
+    reg, bridge, _ = phone_setup(tmp_path)
+    assert reg.run("phone_status", {}) == "Your phone isn't connected to Max right now."
+    bridge.connected(+1)
+    bridge.timeout = 0.05
+    assert "didn't answer in time" in reg.run("phone_status", {})
+    assert reg.run("phone_timer", {"duration": "soon"}).startswith("Error")
+    assert parse_duration("10 minutes") == 600 and parse_duration("90s") == 90 and parse_duration("half an hour") == 1800
+    assert parse_duration("5") == 300
+
+
+def test_phone_api_results_state_and_connection_count():
+    from max_assistant.events import EventBus
+    from max_assistant.phone import PhoneBridge
+
+    token = "q" * 40
+    phone, rt = api_client(token=token, client=("100.64.0.7", 40000))
+    rt.ctx.phone = bridge = PhoneBridge(rt.bus, timeout=3)
+    auth = {"Authorization": f"Bearer {token}"}
+    with phone.websocket_connect(f"/api/ws?token={token}") as ws:
+        ws.receive_json()
+        assert bridge.online
+        assert phone.post("/api/phone/state", json={"apps": [{"label": "Maps", "package": "com.google.maps"}], "battery": 80},
+                          headers=auth).json() == {"ok": True, "apps": 1}
+        assert bridge.apps() == {"maps": "com.google.maps"}
+        out = {}
+        t = threading.Thread(target=lambda: out.update(bridge.request("status")))
+        t.start()
+        while True:                                               # the phone hears the action over the socket
+            ev = ws.receive_json()
+            if ev["kind"] == "phone_action":
+                break
+        assert phone.post("/api/phone/result", json={"id": ev["data"]["id"], "ok": True, "message": "Battery 80%."},
+                          headers=auth).json() == {"ok": True}
+        t.join(3)
+        assert out == {"ok": True, "message": "Battery 80%."}
+    assert not bridge.online
+    assert phone.post("/api/phone/result", json={"id": 999, "message": "late"}, headers=auth).status_code == 404
