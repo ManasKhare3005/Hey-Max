@@ -5,4 +5,13 @@
         <item name="android:statusBarColor">#060A13</item>
         <item name="android:navigationBarColor">#060A13</item>
     </style>
+    <!-- The listening sheet: see-through, over whatever app is open -->
+    <style name="Theme.Max.Sheet" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.InputMethod</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">#0B1220</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

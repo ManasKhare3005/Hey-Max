@@ -54,6 +54,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Start listening if idle (the assistant sheet calls this as soon as it opens). */
+    fun listen() {
+        if (phase.value == Phase.IDLE) startRecording()
+    }
+
+    fun stopSpeaking() {
+        player.stop()
+        if (phase.value == Phase.SPEAKING) phase.value = Phase.IDLE
+    }
+
     private fun startRecording() {
         api() ?: return
         error.value = ""

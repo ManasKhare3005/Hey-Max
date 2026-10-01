@@ -27,8 +27,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.manaskhare.max.Hub
 import com.manaskhare.max.MainViewModel
+import com.manaskhare.max.MaxTileService
+import com.manaskhare.max.MaxWidget
+import android.app.StatusBarManager
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
+import android.graphics.drawable.Icon
+import android.os.Build
+import com.manaskhare.max.R
 
 @SuppressLint("BatteryLife")
 @Composable
@@ -42,6 +51,11 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
     var test by remember { mutableStateOf("") }
     val power = context.getSystemService(PowerManager::class.java)
     var unrestricted by remember { mutableStateOf(power.isIgnoringBatteryOptimizations(context.packageName)) }
+    // Re-check whenever you come back (e.g. from the system battery prompt or Samsung's settings)
+    LifecycleResumeEffect(Unit) {
+        unrestricted = power.isIgnoringBatteryOptimizations(context.packageName)
+        onPauseOrDispose { }
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Row(Modifier.padding(top = 14.dp)) { Title("Settings") } }
@@ -88,6 +102,35 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
         }
         item {
             Card {
+                Label("quick access")
+                Spacer(Modifier.height(6.dp))
+                Text("Talk to Max without opening the app: it slides up over whatever you're doing and listens.",
+                     color = Text2, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                GhostButton("Make Max my assistant (side key)", Modifier.fillMaxWidth()) {
+                    runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) }
+                }
+                Text("Pick “Digital assistant app” → Max. Then Settings → Advanced features → Side button → " +
+                     "Press and hold → Digital assistant.", color = Text2, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton("Add Quick Settings tile") {
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            context.getSystemService(StatusBarManager::class.java).requestAddTileService(
+                                ComponentName(context, MaxTileService::class.java), "Max",
+                                Icon.createWithResource(context, R.drawable.ic_stat_max), context.mainExecutor) { }
+                        }
+                    }
+                    GhostButton("Add widget") {
+                        val wm = context.getSystemService(AppWidgetManager::class.java)
+                        if (wm.isRequestPinAppWidgetSupported) wm.requestPinAppWidget(ComponentName(context, MaxWidget::class.java), null, null)
+                    }
+                }
+                Text("Also: long-press the Max icon → “Talk to Max”.", color = Text2, fontSize = 12.sp)
+            }
+        }
+        item {
+            Card {
                 Label("laptop controls")
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -103,14 +146,19 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
                 Label("stay connected")
                 Spacer(Modifier.height(6.dp))
                 Text(if (unrestricted) "✓ Battery optimisation is off for Max: notifications arrive reliably."
-                     else "Samsung may close Max in the background and delay reminders. Allow it to run unrestricted.",
+                     else "Samsung may close Max in the background and delay reminders. Allow it to run unrestricted " +
+                          "(or: Settings → Apps → Max → Battery → Unrestricted).",
                      color = if (unrestricted) Green else Text2, fontSize = 13.sp)
                 if (!unrestricted) {
                     Spacer(Modifier.height(8.dp))
                     GhostButton("Allow background") {
-                        context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                                     Uri.parse("package:${context.packageName}")))
-                        unrestricted = true
+                        runCatching {
+                            context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                                         Uri.parse("package:${context.packageName}")))
+                        }.onFailure {      // some Samsung builds hide that prompt: open the app's own settings
+                            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                         Uri.parse("package:${context.packageName}")))
+                        }
                     }
                 }
             }

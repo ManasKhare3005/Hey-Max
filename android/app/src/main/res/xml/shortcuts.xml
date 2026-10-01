@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon -> "Talk to Max" -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="talk"
+        android:enabled="true"
+        android:icon="@drawable/ic_max"
+        android:shortcutShortLabel="@string/shortcut_talk"
+        android:shortcutLongLabel="@string/shortcut_talk">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.manaskhare.max"
+            android:targetClass="com.manaskhare.max.AssistActivity" />
+    </shortcut>
+</shortcuts>

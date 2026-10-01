@@ -142,6 +142,7 @@ A native Kotlin + Jetpack Compose app (`android/`) that talks to Max on the lapt
 - **chat, today, memory, notes**: the conversation, what's due on Canvas, reminders (add/cancel), facts (add/forget), and meeting/lecture notes (start/stop recording on the laptop, read the notes)
 - **always connected**: a foreground service keeps one WebSocket open, so reminders, "notes ready" and **approvals** arrive as notifications. Risky actions started from the phone wait for your **Approve / Deny** tap (90 s, silence = no) and never use the laptop mic
 - **laptop controls**: listen now, pause / resume the mic
+- **quick access without opening the app**: a listening sheet slides up over whatever you're doing and starts listening at once. Open it from the side key (set Max as the phone's digital assistant), a Quick Settings tile, a home-screen widget, or long-press the app icon → "Talk to Max". It listens again if Max asks a question and closes itself after the reply; Settings → Quick access sets each one up in a tap
 
 How it connects: the API stays on `127.0.0.1`. [Tailscale](https://tailscale.com) gives the phone a private, encrypted route to the laptop, and `tailscale serve --bg 8765` publishes the API at `https://<laptop>.<tailnet>.ts.net` inside your tailnet only. Requests from the laptop itself are trusted; anything else needs the phone token (created in `data/phone_token.txt`, never committed).
 
