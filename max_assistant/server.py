@@ -1,7 +1,8 @@
 """Dashboard backend: REST API + WebSocket event stream, served from a background thread.
 
-Bound to 127.0.0.1 only. This is also the API the Phase 4 phone/watch apps will use
-(then exposed over Tailscale). The React dashboard (dashboard/dist) is served at "/".
+Bound to 127.0.0.1 only. The phone app reaches it through `tailscale serve` (see
+remote.py): requests from this laptop are trusted, anything proxied needs the phone token.
+The React dashboard (dashboard/dist) is served at "/".
 """
 from __future__ import annotations
 
@@ -14,13 +15,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import requests
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import ROOT
 from .events import ApprovalBroker, EventBus
+from . import remote
 
 log = logging.getLogger(__name__)
 DIST = ROOT / "dashboard" / "dist"
@@ -32,9 +34,10 @@ class Runtime:
     ctx: Any
     bus: EventBus
     approvals: ApprovalBroker
-    run_command: Callable[[str], str]           # typed command -> reply (serialised with voice)
+    run_command: Callable[..., str]             # (text, source=) -> reply (serialised with voice)
     info: dict = field(default_factory=dict)    # static facts: name, wake phrase, models...
     controls: Any = None                        # events.Controls (voice mode only)
+    token: str = ""                             # phone token; "" = only this laptop may connect
 
 
 class Text(BaseModel):
@@ -53,6 +56,10 @@ class Answer(BaseModel):
 class NotesStart(BaseModel):
     kind: str = "lecture"
     title: str = ""
+
+
+class Speak(BaseModel):
+    text: str
 
 
 class _Cached:
@@ -98,6 +105,90 @@ def create_app(rt: Runtime) -> FastAPI:
         return requests.get(f"{searx}/search", params={"q": "ping", "format": "json"}, timeout=2).ok
 
     probes = {"gpu": _Cached(_gpu, 5), "models": _Cached(ollama, 5), "searxng": _Cached(searxng_up, 30)}
+    speech = {"tts": None, "lock": threading.Lock()}
+
+    def local(request) -> bool:
+        return remote.is_local(request.client.host if request.client else None, request.headers)
+
+    def allowed(request) -> bool:
+        return local(request) or bool(rt.token) and remote.token_ok(rt.token, request.headers,
+                                                                     request.query_params)
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        # The dashboard's static files hold nothing private; every API call does
+        if request.url.path.startswith("/api") and not allowed(request):
+            return JSONResponse({"detail": "pair this device first (missing or wrong token)"}, 401)
+        return await call_next(request)
+
+    def source(request) -> str:
+        return "dashboard" if local(request) else "phone"
+
+    def local_only(request):
+        if not local(request):
+            raise HTTPException(403, "only from the laptop itself")
+
+    # ----- phone: pairing, voice in, voice out -----
+    @app.get("/api/ping")
+    def ping(request: Request):
+        return {"ok": True, "name": rt.info.get("name", "Max"), "mode": rt.info.get("mode"),
+                "local": local(request)}
+
+    @app.get("/api/pair")
+    def pair(request: Request):
+        local_only(request)                  # never hand the token to a remote caller
+        phone = cfg.get("phone", {}) or {}
+        url = (phone.get("public_url") or remote.tailscale_url() or "").rstrip("/")
+        link = remote.pairing_link(url, rt.token) if url and rt.token else ""
+        return {"enabled": bool(rt.token), "url": url, "token": rt.token, "link": link,
+                "qr_svg": remote.qr_svg(link) if link else "", "tailscale": bool(remote.tailscale_url())}
+
+    def stt():
+        ctx = rt.ctx
+        if ctx.stt is None:                  # text mode: load Whisper on first use
+            from .stt import SpeechToText
+
+            ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
+                                   prompt=cfg.stt.get("prompt"))
+        return ctx.stt
+
+    @app.post("/api/voice")
+    async def voice(request: Request):
+        """Phone push-to-talk: WAV body (16-bit PCM) -> transcript -> agent -> reply text."""
+        from starlette.concurrency import run_in_threadpool
+
+        from .listen import strip_wake_word
+
+        body = await request.body()
+        if not body or len(body) > 20 * 2**20:
+            raise HTTPException(400, "send a WAV recording (up to 20 MB)")
+        try:
+            audio = remote.decode_wav(body)
+        except Exception as exc:
+            raise HTTPException(400, f"couldn't read the audio: {exc}")
+        text = await run_in_threadpool(lambda: stt().whisper(audio))
+        text = strip_wake_word(text) if text else ""
+        if not text or text.lower().strip(" .!?,") in ("thank you", "thanks", "you", "bye", "uh", "um"):
+            return {"heard": "", "reply": ""}
+        reply = await run_in_threadpool(rt.run_command, text, source(request))
+        return {"heard": text, "reply": reply}
+
+    @app.post("/api/speak")
+    def speak(body: Speak):
+        """Max's voice for the phone: text -> WAV (Piper, same voice as the laptop)."""
+        from .tts import PiperTTS, clean_for_speech
+
+        text = clean_for_speech(body.text)[:1500]
+        if not text:
+            raise HTTPException(400, "nothing to say")
+        with speech["lock"]:
+            if speech["tts"] is None:
+                try:
+                    speech["tts"] = PiperTTS(cfg.tts.piper_voice, cfg.tts.get("speed", 1.0))
+                except Exception as exc:
+                    raise HTTPException(503, f"Piper voice unavailable: {exc}")
+            audio, sr = speech["tts"].synthesize(text)
+        return Response(remote.encode_wav(audio, sr), media_type="audio/wav")
 
     # ----- state & events -----
     @app.get("/api/state")
@@ -126,6 +217,9 @@ def create_app(rt: Runtime) -> FastAPI:
 
     @app.websocket("/api/ws")
     async def ws(socket: WebSocket):
+        if not allowed(socket):
+            await socket.close(code=4401)
+            return
         await socket.accept()
         q = rt.bus.subscribe(asyncio.get_running_loop())
         try:
@@ -140,15 +234,15 @@ def create_app(rt: Runtime) -> FastAPI:
 
     # ----- commands & approvals -----
     @app.post("/api/command")
-    def command(body: Text):                  # runs in FastAPI's thread pool
+    def command(body: Text, request: Request):   # runs in FastAPI's thread pool
         text = body.text.strip()
         if not text:
             raise HTTPException(400, "empty command")
-        return {"reply": rt.run_command(text)}
+        return {"reply": rt.run_command(text, source(request))}
 
     @app.post("/api/approvals/{approval_id}")
-    def approve(approval_id: int, body: Answer):
-        if not rt.approvals.answer(approval_id, body.approved):
+    def approve(approval_id: int, body: Answer, request: Request):
+        if not rt.approvals.answer(approval_id, body.approved, source(request)):
             raise HTTPException(404, "no such pending approval")
         return {"ok": True}
 
@@ -199,6 +293,11 @@ def create_app(rt: Runtime) -> FastAPI:
     def notes_status():
         return notes_mgr().status()
 
+    @app.get("/api/notes/live")
+    def notes_live():
+        """Live transcript while recording: recent Whisper text + live captions after it."""
+        return notes_mgr().live_view()
+
     @app.post("/api/notes/start")
     def notes_start(body: NotesStart):
         try:
@@ -228,11 +327,28 @@ def create_app(rt: Runtime) -> FastAPI:
             raise HTTPException(404, "no such notes")
         folder = Path(n["folder"])
         read = lambda name: (folder / name).read_text(encoding="utf-8") if (folder / name).exists() else ""
-        return {**n, "notes_md": read("notes.md"), "transcript_md": read("transcript.md")}
+        return {**n, "notes_md": read("notes.md"), "transcript_md": read("transcript.md"),
+                "summary_md": read("summary.md")}
+
+    @app.post("/api/notes/{note_id}/summary")
+    def notes_summary(note_id: int, refresh: bool = False):
+        """Short study summary (TL;DR, takeaways, to-dos); made by the local model on first ask."""
+        from pathlib import Path
+
+        n = rt.ctx.memory.note(note_id) if rt.ctx.memory else None
+        if n is None or not (Path(n["folder"]) / "notes.md").exists():
+            raise HTTPException(404, "no such notes")
+        try:
+            text = notes_mgr().summary(Path(n["folder"]), n.get("kind") or "lecture", refresh)
+        except Exception as exc:
+            raise HTTPException(503, f"couldn't write the summary: {exc}")
+        return {"summary_md": text}
 
     @app.post("/api/notes/{note_id}/open")
-    def notes_open(note_id: int):
+    def notes_open(note_id: int, request: Request):
         import os
+
+        local_only(request)                            # opens Explorer on the laptop
 
         n = rt.ctx.memory.note(note_id) if rt.ctx.memory else None
         if n is None:

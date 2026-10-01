@@ -91,6 +91,16 @@ if (-not (Test-Path (Join-Path $kwsDir "tokens.txt"))) {
     Move-Item (Join-Path $kwsParent $kwsName) $kwsDir
     Remove-Item $kwsArchive
 }
+# Live captions while taking notes (streaming model, ~60 MB)
+$liveName = "sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
+$liveParent = Join-Path $PSScriptRoot "models\live"
+if (-not (Test-Path (Join-Path $liveParent "$liveName\tokens.txt"))) {
+    $liveArchive = Join-Path $env:TEMP "$liveName.tar.bz2"
+    Invoke-WebRequest "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$liveName.tar.bz2" -OutFile $liveArchive
+    New-Item -ItemType Directory -Force -Path $liveParent | Out-Null
+    tar -xjf $liveArchive -C $liveParent; Check "Extracting the live caption model"
+    Remove-Item $liveArchive
+}
 & $venvPy -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')"
 Check "Downloading the Whisper model"
 $moonName = "sherpa-onnx-moonshine-base-en-int8"

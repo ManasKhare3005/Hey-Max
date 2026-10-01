@@ -101,9 +101,11 @@ In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete a
 
 "Hey Max, **take notes**" (lecture: listens through the mic) or "take notes on my Zoom call" (meeting: records the laptop's audio plus your mic), or press ⏺ on the overlay / use the dashboard's Notes tab. "**Stop taking notes**" when it's over.
 
-- Transcribes as it goes (Whisper, chunks cut at pauses, with the topic and recent sentences as a vocabulary hint), so stopping doesn't mean waiting an hour.
+- **Live captions**: words appear ~0.5 s after they're said (a small streaming model, sherpa-onnx "Kroko", ~3% of a CPU core) in the dashboard, the overlay pill and the phone app.
+- Whisper transcribes in the background (chunks cut at pauses, with the topic and recent sentences as a vocabulary hint) and its more accurate text **replaces the live captions** every ~30 s. Only Whisper's text is saved, so stopping doesn't mean waiting an hour.
 - Notes are written in sections (the local model reads ~4k tokens at a time) and combined into **Summary, Key points, Details, Action items & deadlines, Open questions**.
 - A **"Deadlines & dates (exact quotes)"** section is added straight from the transcript, since the model can garble a time.
+- **Summary** button (next to Notes / Transcript): a short study summary (TL;DR, key takeaways, to-dos) written on first click and saved as `summary.md`; date quotes are copied verbatim.
 - Saved to `Documents\Max Notes\<date> <title>\` as `notes.md` + `transcript.md`; no audio is kept. "What were the key points of today's lecture?" answers from them.
 - Recording other people can require their consent (ASU generally requires the instructor's permission to record lectures).
 
@@ -130,7 +132,22 @@ While Max runs, open **http://127.0.0.1:8765** (this laptop only). A mission-con
 - **live activity**: tool calls, results, reminders, approvals as they happen
 - **memory & reminders** drawer: search facts by meaning, add or forget them, set and cancel reminders
 
-The same REST + WebSocket API (`/api/docs`) is what the phone and watch apps will use. Built with React + Vite + TypeScript (`dashboard/`); `setup.ps1` builds it if Node.js is installed. For UI work: `cd dashboard && npm run dev` (proxies to a running Max).
+The same REST + WebSocket API (`/api/docs`) is what the phone app uses (and the watch will). Built with React + Vite + TypeScript (`dashboard/`); `setup.ps1` builds it if Node.js is installed. For UI work: `cd dashboard && npm run dev` (proxies to a running Max).
+
+## Phone app (Android)
+
+A native Kotlin + Jetpack Compose app (`android/`) that talks to Max on the laptop from anywhere:
+
+- **push-to-talk**: tap the mic, speak, and the reply plays in Max's own Piper voice (transcription and the LLM still run on the laptop)
+- **chat, today, memory, notes**: the conversation, what's due on Canvas, reminders (add/cancel), facts (add/forget), and meeting/lecture notes (start/stop recording on the laptop, read the notes)
+- **always connected**: a foreground service keeps one WebSocket open, so reminders, "notes ready" and **approvals** arrive as notifications. Risky actions started from the phone wait for your **Approve / Deny** tap (90 s, silence = no) and never use the laptop mic
+- **laptop controls**: listen now, pause / resume the mic
+
+How it connects: the API stays on `127.0.0.1`. [Tailscale](https://tailscale.com) gives the phone a private, encrypted route to the laptop, and `tailscale serve --bg 8765` publishes the API at `https://<laptop>.<tailnet>.ts.net` inside your tailnet only. Requests from the laptop itself are trusted; anything else needs the phone token (created in `data/phone_token.txt`, never committed).
+
+Pairing: install Tailscale on both devices (same account) → run `tailscale serve --bg 8765` once → dashboard **Phone** tab shows a QR code → app **Settings → Pair (scan QR)**. On Samsung, allow the app to run unrestricted (Settings has a button) so notifications aren't delayed.
+
+Building: `android\build.ps1` builds `app-debug.apk` with the JDK/SDK in `C:\max-android` (no Android Studio needed) and installs it over USB if the phone is connected with USB debugging on.
 
 ## Web search and browsing
 
@@ -180,6 +197,8 @@ max_assistant/
   reminders.py   natural-language times, scheduler, Windows notifications
   events.py      event bus + approval broker (voice or dashboard)
   server.py      FastAPI: REST + WebSocket, serves the dashboard
+  remote.py      phone access: token, pairing QR, audio in/out
+  live.py        live captions while taking notes (streaming model)
   browser.py     Max's Chrome window (Playwright), element finding
   tools/
     registry.py  @tool decorator, schemas, risky flags
@@ -188,6 +207,7 @@ max_assistant/
     browser.py   click / type / navigate / read / tabs
     memory.py    remember / recall / forget, reminders
 dashboard/      React + Vite + TypeScript mission-control UI
+android/        Kotlin + Jetpack Compose phone app
 tests/           pytest suite (runs without a mic, GPU or Ollama)
 ```
 

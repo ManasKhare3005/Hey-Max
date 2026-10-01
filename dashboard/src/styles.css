@@ -322,3 +322,26 @@ code { font-family: var(--mono); font-size: 0.92em; color: var(--cyan); }
 .md li::marker { color: var(--cyan); }
 .md strong { color: #f0fdff; }
 .md q { color: var(--amber); }
+
+/* phone pairing */
+.pair-qr { align-self: center; width: 240px; padding: 14px; background: #f0fdff; border-radius: 14px;
+  box-shadow: 0 0 0 1px var(--line), 0 0 32px rgba(34, 211, 238, 0.18); }
+.pair-qr svg { display: block; width: 100%; height: auto; }
+.pair-steps { margin: 8px 0 0; padding-left: 20px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+.list-row.static { cursor: default; justify-content: space-between; gap: 12px; }
+.mono { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.linkish { background: none; border: 0; color: var(--cyan); cursor: pointer; padding: 0; text-align: right; }
+.summary-redo { margin-top: 14px; }
+
+/* live transcript while recording */
+.live-box { max-height: 260px; overflow-y: auto; margin: 10px 0 12px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(6, 10, 19, 0.6); border: 1px solid var(--line); font-size: 13.5px; line-height: 1.55; }
+.live-box p { margin: 0 0 6px; }
+.live-final { color: var(--text); }
+.live-t { font-family: var(--mono); font-size: 10.5px; color: var(--text-3, #64748b); margin-right: 8px; }
+.live-rough { color: var(--text-2); font-style: italic; }
+.live-partial { color: var(--cyan); opacity: 0.85; }
+.live-caret { display: inline-block; width: 7px; height: 13px; margin-left: 3px; vertical-align: -2px;
+  background: var(--cyan); animation: caret 1s steps(2) infinite; }
+.live-wait { color: var(--text-2); font-size: 12.5px; }
+@keyframes caret { 50% { opacity: 0; } }

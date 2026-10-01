@@ -1,4 +1,6 @@
 """Tests run anywhere: no mic, GPU, Ollama or Windows needed."""
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -944,7 +946,9 @@ def test_agent_attaches_memories_and_logs_turns(tmp_path):
 
 # ---------- dashboard API ----------
 
-def api_client(run_command=lambda text: f"echo: {text}"):
+LOCAL = ("127.0.0.1", 50000)       # requests from the laptop itself (no token needed)
+
+def api_client(run_command=lambda text, source="dashboard": f"echo: {text}", token="", client=LOCAL):
     from fastapi.testclient import TestClient
 
     from max_assistant.events import ApprovalBroker, EventBus
@@ -956,8 +960,8 @@ def api_client(run_command=lambda text: f"echo: {text}"):
     ctx.reminders = Reminders(ctx.memory)
     bus = EventBus()
     approvals = ApprovalBroker(bus)
-    rt = Runtime(ctx, bus, approvals, run_command, {"name": "Max"})
-    return TestClient(create_app(rt)), rt
+    rt = Runtime(ctx, bus, approvals, run_command, {"name": "Max"}, token=token)
+    return TestClient(create_app(rt), client=client), rt
 
 
 def test_api_facts_reminders_and_commands():
@@ -1125,7 +1129,7 @@ def test_api_remote_control_and_today():
     ctx = digest_ctx()
     bus = EventBus()
     controls = Controls()
-    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {}, controls)))
+    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {}, controls)), client=LOCAL)
     controls.paused.set()
     assert client.post("/api/control/listen").json() == {"ok": True, "paused": False}
     assert controls.listen_now.is_set() and not controls.paused.is_set()     # push-to-talk also unpauses
@@ -1135,7 +1139,7 @@ def test_api_remote_control_and_today():
     assert client.post("/api/control/explode").status_code == 404
     today = client.get("/api/today").json()
     assert set(today) >= {"due_today", "due_soon", "classes", "reminders", "date"}
-    no_controls = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})))
+    no_controls = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})), client=LOCAL)
     assert no_controls.post("/api/control/listen").status_code == 409        # text mode: no mic to control
 
 
@@ -1231,8 +1235,279 @@ def test_api_notes_start_stop():
     ctx = digest_ctx()
     ctx.notes = FakeNotes()
     bus = EventBus()
-    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})))
+    client = TestClient(create_app(Runtime(ctx, bus, ApprovalBroker(bus), lambda t: t, {})), client=LOCAL)
     r = client.post("/api/notes/start", json={"kind": "meeting", "title": "Standup"})
     assert r.status_code == 200 and r.json()["kind"] == "meeting" and ctx.notes.started == ("meeting", "Standup")
     assert client.get("/api/notes/status").json() == {"active": True}
     assert client.post("/api/notes/stop").json() == {"ok": True}
+
+
+# ---------- phone access (Phase 4) ----------
+
+def test_phone_requests_need_the_token_and_local_ones_dont():
+    from max_assistant.remote import is_local
+
+    assert is_local("127.0.0.1", {}) and is_local("::1", {})
+    assert not is_local("127.0.0.1", {"x-forwarded-for": "100.64.0.7"})        # via tailscale serve
+    assert not is_local("100.64.0.7", {})
+    token = "t" * 40
+    phone, rt = api_client(token=token, client=("100.64.0.7", 40000))
+    assert phone.get("/api/state").status_code == 401
+    assert phone.get("/api/state", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    auth = {"Authorization": f"Bearer {token}"}
+    assert phone.get("/api/ping", headers=auth).json()["local"] is False
+    assert phone.get("/api/pair", headers=auth).status_code == 403            # token never leaves the laptop
+    assert phone.get("/api/state", params={"token": token}).status_code == 200
+    with pytest.raises(Exception):
+        with phone.websocket_connect("/api/ws") as ws:
+            ws.receive_json()
+    with phone.websocket_connect(f"/api/ws?token={token}") as ws:
+        assert ws.receive_json()["kind"] == "hello"
+    proxied, _ = api_client(token=token)
+    assert proxied.get("/api/facts", headers={"X-Forwarded-For": "100.64.0.7"}).status_code == 401
+    no_token, _ = api_client(token="", client=("100.64.0.7", 40000))
+    assert no_token.get("/api/state", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_phone_commands_are_tagged_and_pairing_gives_a_qr(monkeypatch):
+    from max_assistant import remote
+
+    seen = []
+    token = "p" * 40
+    run = lambda text, source="dashboard": seen.append(source) or "done"
+    phone, rt = api_client(run, token=token, client=("100.64.0.7", 40000))
+    auth = {"Authorization": f"Bearer {token}"}
+    phone.post("/api/command", json={"text": "open youtube"}, headers=auth)
+    laptop, _ = api_client(run, token=token)
+    laptop.post("/api/command", json={"text": "open youtube"})
+    assert seen == ["phone", "dashboard"]
+    a = rt.approvals.open("Send it?")
+    assert phone.post(f"/api/approvals/{a.id}", json={"approved": True}, headers=auth).json() == {"ok": True}
+    assert a.by == "phone"
+    monkeypatch.setattr(remote, "tailscale_url", lambda: "https://laptop.tail1234.ts.net")
+    laptop, _ = api_client(token=token)
+    p = laptop.get("/api/pair").json()
+    assert p["url"] == "https://laptop.tail1234.ts.net" and p["token"] == token
+    assert p["link"].startswith("max://pair?url=https%3A%2F%2Flaptop") and p["qr_svg"].lstrip().startswith("<")
+
+
+def test_phone_voice_endpoint_transcribes_and_runs(monkeypatch):
+    from max_assistant.remote import decode_wav, encode_wav
+
+    t = np.arange(0, 1.0, 1 / 44100)
+    wav = encode_wav((0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), 44100)
+    audio = decode_wav(wav)
+    assert abs(len(audio) - 16000) <= 1 and audio.dtype == np.float32
+    seen = []
+    client, rt = api_client(lambda text, source="dashboard": seen.append((text, source)) or "Opening YouTube.")
+
+    class FakeSTT:
+        def whisper(self, a, prompt=None):
+            assert abs(len(a) - 16000) <= 1
+            return "Hey Max, open YouTube."
+
+    rt.ctx.stt = FakeSTT()
+    r = client.post("/api/voice", content=wav, headers={"Content-Type": "audio/wav"}).json()
+    assert r == {"heard": "open YouTube.", "reply": "Opening YouTube."} and seen == [("open YouTube.", "dashboard")]
+    rt.ctx.stt.whisper = lambda a, prompt=None: "Thank you."
+    assert client.post("/api/voice", content=wav).json() == {"heard": "", "reply": ""}
+    assert client.post("/api/voice", content=b"not audio").status_code == 400
+
+
+def test_phone_commands_need_a_tap_not_the_laptop_mic():
+    import threading as th
+
+    from max_assistant.events import ApprovalBroker, EventBus, current_origin, set_origin
+
+    bus = EventBus()
+    approvals = ApprovalBroker(bus)
+    assert approvals.wait("Delete it?", timeout=0.05) is False               # no tap = no
+    assert bus.recent[-1]["data"]["by"] == "timeout"
+    th.Timer(0.1, lambda: approvals.answer(approvals.pending()[0]["id"], True, "phone")).start()
+    assert approvals.wait("Delete it?", timeout=5) is True
+    set_origin("phone")
+    assert current_origin() == "phone"
+    seen = []
+    th.Thread(target=lambda: seen.append(current_origin())).start()
+    time.sleep(0.05)
+    assert seen == ["local"]                                                  # per thread
+    set_origin("local")
+
+
+def test_notes_summary_is_made_once_and_keeps_exact_deadline_quotes(tmp_path):
+    from max_assistant.notes import NotesManager, make_summary, section
+
+    notes_md = ("# Bio 101\n\n## Summary\nCells.\n\n## Key points\n- Mitochondria make ATP\n\n"
+                "## Deadlines & dates (exact quotes)\n- [12:03] “Lab report due Friday at 11:59 PM.”\n")
+    assert section(notes_md, "Key points") == "- Mitochondria make ATP"
+    seen = []
+
+    def summarize(system, text, max_tokens):
+        seen.append(text)
+        return "## TL;DR\nCells make energy.\n\n## Key takeaways\n- ATP\n\n## To do\n- Lab report due Friday at 5:59 PM"
+
+    out = make_summary(summarize, notes_md)
+    assert "exact quotes" not in seen[0]                       # the model never sees (or rewrites) the quotes
+    assert out.endswith("## Exact quotes about dates\n- [12:03] “Lab report due Friday at 11:59 PM.”")
+
+    folder = tmp_path / "2026-09-30 Bio 101"
+    folder.mkdir()
+    (folder / "notes.md").write_text(notes_md, encoding="utf-8")
+    ctx = digest_ctx()
+    ctx.memory = memory_store()
+    mgr = NotesManager(ctx, lambda: None, tmp_path)
+    mgr.summarize = summarize
+    ctx.notes = mgr
+    nid = ctx.memory.add_notes("Bio 101", "lecture", "2026-09-30T10:00", "2026-09-30T11:00", str(folder), "Cells.", 900)
+    client, rt = api_client()
+    rt.ctx.memory, rt.ctx.notes = ctx.memory, mgr
+    assert client.get(f"/api/notes/{nid}").json()["summary_md"] == ""
+    first = client.post(f"/api/notes/{nid}/summary").json()["summary_md"]
+    assert "## TL;DR" in first and (folder / "summary.md").exists() and len(seen) == 2
+    assert client.post(f"/api/notes/{nid}/summary").json()["summary_md"].strip() == first   # cached
+    assert len(seen) == 2
+    client.post(f"/api/notes/{nid}/summary", params={"refresh": True})
+    assert len(seen) == 3
+    assert client.get(f"/api/notes/{nid}").json()["summary_md"].startswith("## TL;DR")
+    assert client.post("/api/notes/999/summary").status_code == 404
+
+
+# ---------- live captions ----------
+
+class FakeOnlineRecognizer:
+    """Stands in for sherpa_onnx.OnlineRecognizer: 'hears' one word per 0.5 s of loud audio and
+    ends a line after 1 s of quiet."""
+
+    def __init__(self):
+        self.words = iter("today we cover knowledge graphs and rdf triples assignment two is due friday".split())
+
+    class Stream(dict):
+        def accept_waveform(self, sr, x):
+            self["last"] = x
+
+    def create_stream(self):
+        return self.Stream(text=[], loud=0, quiet=0)
+
+    def is_ready(self, s):
+        return False
+
+    def decode_stream(self, s):
+        pass
+
+    def get_result(self, s):
+        x = s["last"]
+        blocks = round(len(x) / 1600)      # 100 ms blocks
+        if float(np.sqrt(np.mean(x ** 2))) > 0.01:
+            s["loud"] += blocks
+            s["quiet"] = 0
+            while s["loud"] >= 5:
+                s["loud"] -= 5
+                s["text"].append(next(self.words, "x"))
+        else:
+            s["quiet"] += blocks
+        return " ".join(s["text"])
+
+    def is_endpoint(self, s):
+        return s["quiet"] >= 10 and bool(s["text"])
+
+    def reset(self, s):
+        s.update(text=[], loud=0, quiet=0)
+
+
+def fake_live():
+    from max_assistant.live import LiveModel, LiveTranscriber
+
+    model = LiveModel.__new__(LiveModel)
+    model.recognizer = FakeOnlineRecognizer()
+    return LiveTranscriber(model)
+
+
+def wait_for(cond, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end and not cond():
+        time.sleep(0.02)
+    return cond()
+
+
+def test_live_captions_show_words_then_lines():
+    live = fake_live()
+    tone = speechy(1.0)
+    for i in range(0, len(tone), 1600):
+        live.push(tone[i:i + 1600])                      # 100 ms blocks, like the mic
+    assert wait_for(lambda: live.view(0)[1] == "today we")
+    for _ in range(12):
+        live.push(np.zeros(1600, np.float32))            # a pause ends the line
+    assert wait_for(lambda: len(live.view(0)[0]) == 1)
+    lines, partial = live.view(0)
+    assert lines[0].text == "today we" and partial == "" and lines[0].start_s < 0.5
+    assert live.view(after_s=lines[0].end_s)[0] == []    # once Whisper has covered it, it's dropped
+    live.close()
+
+
+def test_whisper_text_replaces_live_captions():
+    from max_assistant.notes import NoteSession
+
+    live = fake_live()
+    release = threading.Event()
+
+    def transcribe(audio, prompt):
+        release.wait(5)                                  # Whisper is slow: hold it back
+        return "Today we cover knowledge graphs."
+
+    session = NoteSession("lecture", transcribe, lambda s, t, n: "- notes", title="CSE 573", live=live)
+    block = speechy(26)
+    for i in range(0, len(block), 1600):
+        session.push(block[i:i + 1600])
+    for _ in range(12):
+        session.push(np.zeros(1600, np.float32))
+    assert wait_for(lambda: session.live_view()["live"] != [])
+    view = session.live_view()
+    assert view["final"] == [] and view["captions"] and view["live"][0]["text"].startswith("today we cover")
+    assert session.status()["last"].startswith("today we cover")        # overlay/phone see live words
+    session.push(np.zeros(16000 * 8, np.float32))         # long enough for the segmenter to cut a chunk
+    release.set()
+    assert wait_for(lambda: session.live_view()["final"] != [])
+    view = session.live_view()
+    assert view["final"][0]["text"] == "Today we cover knowledge graphs." and view["live"] == []
+    session.finish()
+
+
+def test_live_captions_real_model():
+    from max_assistant.config import ROOT
+    from max_assistant.live import LiveModel, LiveTranscriber
+
+    d = ROOT / "models/live/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
+    wav = d / "test_wavs" / "0.wav"
+    if not wav.exists():
+        pytest.skip("live caption model not downloaded")
+    import wave
+
+    with wave.open(str(wav)) as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+    live = LiveTranscriber(LiveModel(d))
+    for i in range(0, len(x), 1600):
+        live.push(x[i:i + 1600])
+    live.push(np.zeros(16000 * 3, np.float32))
+    assert wait_for(lambda: any("country" in l.text.lower() for l in live.view(0)[0]) or "country" in live.view(0)[1].lower())
+    live.close()
+
+
+def test_config_has_no_duplicate_keys():
+    """YAML silently keeps only the last of two same-named sections (a second 'notes:' once
+    hid every meeting-notes setting)."""
+    import yaml
+
+    from max_assistant.config import ROOT
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    def mapping(loader, node, deep=False):
+        keys = [loader.construct_object(k, deep=deep) for k, _ in node.value]
+        dupes = {k for k in keys if keys.count(k) > 1}
+        assert not dupes, f"duplicate keys in config.yaml: {dupes}"
+        return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    cfg = yaml.load((ROOT / "config.yaml").read_text(encoding="utf-8"), Loader=Strict)
+    assert cfg["notes"]["file"] and cfg["notes"]["live_model"]

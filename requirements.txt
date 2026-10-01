@@ -27,3 +27,4 @@ uvicorn[standard]>=0.29
 # dev
 pytest
 httpx
+qrcode>=7.4            # phone pairing QR code (dashboard)

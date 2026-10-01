@@ -43,6 +43,10 @@ export default function App() {
           <span className="label">notes</span>
           <span className="bar-value">{max.recording ? `● recording ${max.recording}` : "meetings & lectures ›"}</span>
         </button>
+        <button className="bar-btn" onClick={() => setDrawer("phone")}>
+          <span className="label">phone</span>
+          <span className="bar-value">pair ›</span>
+        </button>
         <div className="bar-spacer" />
         <div className="bar-btn static">
           <span className="label">listener</span>

@@ -186,7 +186,9 @@ async function tick() {
   $("rec").classList.toggle("on", recording);
   $("rec").disabled = !online;
   $("rec").title = recording ? "Stop recording and write up the notes" : "Record a lecture or meeting and take notes";
-  if (recording) $("stage").innerHTML = `<span class="recbadge">● REC ${mmss(rec.elapsed_s)}</span> · ${esc(rec.kind)} · ${rec.words} words`;
+  // live captions: the last few words said, right in the pill
+  const said = (rec && rec.last) ? "…" + rec.last.slice(-38).replace(/^\S*\s/, "") : `${rec ? rec.kind : ""} · ${rec ? rec.words : 0} words`;
+  if (recording) $("stage").innerHTML = `<span class="recbadge">● REC ${mmss(rec.elapsed_s)}</span> · ${esc(said)}`;
   else if (rec && rec.ok && rec.finishing) $("stage").textContent = "writing up notes…";
   $("pause").textContent = paused ? "Resume listening" : "Pause listening";
   $("pause").disabled = !online;

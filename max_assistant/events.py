@@ -100,9 +100,30 @@ class ApprovalBroker:
             self._pending.pop(a.id, None)
         self.bus.publish("approval_result", {"id": a.id, "approved": bool(a.approved), "by": a.by})
 
+    def wait(self, prompt: str, timeout: float = 90.0, tool: str = "") -> bool:
+        """Approval by tap only (a phone command: nobody is at the laptop to answer by voice).
+        No answer in time = no."""
+        a = self.open(prompt, tool)
+        answered = a.done.wait(timeout)
+        approved = bool(a.approved) if answered else False
+        self.close(a, approved, a.by if answered else "timeout")
+        return approved
+
     def pending(self) -> list[dict]:
         with self._lock:
             return [{"id": a.id, "prompt": a.prompt, "tool": a.tool} for a in self._pending.values()]
+
+
+_origin = threading.local()
+
+
+def set_origin(origin: str):
+    """Where the command being handled on this thread came from: voice, dashboard, phone."""
+    _origin.value = origin
+
+
+def current_origin() -> str:
+    return getattr(_origin, "value", "local")
 
 
 @dataclass

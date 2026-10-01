@@ -36,6 +36,12 @@ REDUCE_PROMPT = (
     "topic), '## Action items & deadlines' (bullets, or 'None mentioned'), '## Open questions' (bullets, or "
     "'None'). Only use what is in the notes. No title, no introduction."
 )
+SUMMARY_PROMPT = (
+    "Below are a student's notes from a {kind}. Write a short study summary in Markdown with exactly these "
+    "headings: '## TL;DR' (2-3 sentences), '## Key takeaways' (3-6 bullets, the things to remember for an "
+    "exam), '## To do' (bullets of deadlines, assignments and action items with their dates exactly as "
+    "written, or 'Nothing mentioned'). Only use what is in the notes. No title, no introduction."
+)
 MERGE_PROMPT = "Merge these bullet-point notes from consecutive parts of a {kind} into one concise bullet list. Keep every deadline and action item."
 
 
@@ -210,7 +216,7 @@ class NoteSession:
     """One recording. Feed audio with push() (LiveCapture does this), then finish()."""
 
     def __init__(self, kind: str, transcribe: Callable[[np.ndarray, str], str], summarize: Callable[[str, str, int], str],
-                 title: str = "", section_words: int = 700, silence_rms: float = 0.003):
+                 title: str = "", section_words: int = 700, silence_rms: float = 0.003, live=None):
         self.kind = kind                      # "lecture" or "meeting"
         self.title = title or f"{kind.title()} {dt.datetime.now():%b %d, %I:%M %p}".replace(" 0", " ")
         self.transcribe = transcribe
@@ -227,10 +233,14 @@ class NoteSession:
         self._worker = threading.Thread(target=self._work, name="notes-transcribe", daemon=True)
         self._worker.start()
         self.audio_seconds = 0.0
+        self.live = live                      # live.LiveTranscriber: rough captions right away
+        self.covered_s = 0.0                  # audio Whisper has finished with (its text replaces live)
 
     # audio in (any thread)
     def push(self, x: np.ndarray):
         self.audio_seconds += len(x) / SR
+        if self.live is not None:
+            self.live.push(x)
         for chunk in self._seg.push(x):
             self._chunks.put(chunk)
 
@@ -242,8 +252,22 @@ class NoteSession:
         with self._lock:
             words = sum(len(s.text.split()) for s in self.segments)
             last = self.segments[-1].text if self.segments else ""
+        if self.live is not None:             # the freshest words, for the overlay and the phone
+            lines, partial = self.live.view(self.covered_s)
+            fresh = " ".join([l.text for l in lines] + ([partial] if partial else []))
+            last = fresh or last
         return {"title": self.title, "kind": self.kind, "elapsed_s": round(self.elapsed), "words": words,
                 "sections": len(self.section_notes), "last": last[-160:], "queued": self._chunks.qsize()}
+
+    def live_view(self, final_segments: int = 4) -> dict:
+        """The live transcript: the last few Whisper segments (accurate) and, after them,
+        the live caption lines and words in progress (rough, replaced as Whisper catches up)."""
+        with self._lock:
+            final = [{"t": clock(s.start_s), "text": s.text} for s in self.segments[-final_segments:]]
+        lines, partial = self.live.view(self.covered_s) if self.live is not None else ([], "")
+        return {"active": True, "title": self.title, "kind": self.kind, "elapsed_s": round(self.elapsed),
+                "final": final, "live": [{"t": clock(l.start_s), "text": l.text} for l in lines],
+                "partial": partial, "captions": self.live is not None}
 
     def _work(self):
         while True:
@@ -251,7 +275,9 @@ class NoteSession:
             if item is None:
                 break
             start_s, audio = item
+            end_s = start_s + len(audio) / SR
             if float(np.sqrt(np.mean(audio ** 2))) < self.silence_rms:
+                self.covered_s = end_s
                 continue                                     # nothing said in this chunk
             with self._lock:
                 recent = " ".join(" ".join(s.text for s in self.segments[-2:]).split()[-40:])
@@ -263,9 +289,11 @@ class NoteSession:
                 log.warning("notes transcription failed: %s", exc)
                 continue
             if not text:
+                self.covered_s = end_s
                 continue
             with self._lock:
                 self.segments.append(Segment(start_s, text))
+                self.covered_s = end_s
                 self._pending_words += text.split()
                 ready = len(self._pending_words) >= self.section_words
                 if ready:
@@ -282,6 +310,8 @@ class NoteSession:
             self.section_notes.append(text[:1500])
 
     def finish(self) -> NoteResult:
+        if self.live is not None:
+            self.live.close()
         for chunk in self._seg.flush():
             self._chunks.put(chunk)
         self._chunks.put(None)
@@ -337,6 +367,22 @@ def save(result: NoteResult, folder: Path) -> Path:
     return target
 
 
+def section(md: str, heading: str) -> str:
+    """The body of '## <heading>' in a Markdown document ('' if absent)."""
+    m = re.search(rf"^## {re.escape(heading)}[^\n]*\n(.*?)(?=^## |\Z)", md, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def make_summary(summarize: Callable[[str, str, int], str], notes_md: str, kind: str = "lecture") -> str:
+    """Short study summary of saved notes. Exact deadline quotes are copied, never rewritten."""
+    body = re.sub(r"^## Deadlines & dates \(exact quotes\).*", "", notes_md, flags=re.S | re.M).strip()
+    summary = summarize(SUMMARY_PROMPT.format(kind=kind), body, 500).strip()
+    quotes = section(notes_md, "Deadlines & dates (exact quotes)")
+    if quotes:
+        summary += "\n\n## Exact quotes about dates\n" + quotes
+    return summary
+
+
 def extract_summary(notes_md: str) -> str:
     m = re.search(r"## Summary\s*\n(.+?)(\n## |\Z)", notes_md, re.S)
     return re.sub(r"\s+", " ", m.group(1)).strip() if m else notes_md[:300]
@@ -351,13 +397,15 @@ class NotesManager:
     def __init__(self, ctx, transcriber: Callable[[], Callable[[np.ndarray, str], str]], folder: Path,
                  on_event: Callable[[str, dict], None] | None = None,
                  on_done: Callable[[NoteResult | None, str | None], None] | None = None,
-                 include_mic_in_meetings: bool = True):
+                 include_mic_in_meetings: bool = True, live_model_dir: str | Path | None = None):
         self.ctx = ctx
         self._transcriber = transcriber        # factory: loads Whisper lazily (text mode has none yet)
         self.folder = folder
         self.on_event = on_event or (lambda kind, data: None)
         self.on_done = on_done or (lambda result, error: None)
         self.include_mic = include_mic_in_meetings
+        self.live_model_dir = live_model_dir
+        self._live_model = None
         self.session: NoteSession | None = None
         self.capture: LiveCapture | None = None
         self.finishing = False
@@ -372,6 +420,37 @@ class NotesManager:
                          options={"num_predict": max_tokens, "temperature": 0.2})
         return strip_thinking(reply.content)
 
+    def summary(self, folder: Path, kind: str = "lecture", refresh: bool = False) -> str:
+        """summary.md for a saved session, written on first request (or when refreshed)."""
+        path = Path(folder) / "summary.md"
+        if path.exists() and not refresh:
+            return path.read_text(encoding="utf-8")
+        notes = (Path(folder) / "notes.md").read_text(encoding="utf-8")
+        text = make_summary(self.summarize, notes, kind)
+        path.write_text(text + "\n", encoding="utf-8")
+        return text
+
+    def _live(self):
+        """A live-caption stream for a new recording (None if captions are off or unavailable)."""
+        if not self.live_model_dir:
+            return None
+        try:
+            if self._live_model is None:
+                from .live import LiveModel
+
+                self._live_model = LiveModel(self.live_model_dir)
+            from .live import LiveTranscriber
+
+            return LiveTranscriber(self._live_model)
+        except Exception as exc:
+            log.warning("live captions unavailable: %s", exc)
+            self.live_model_dir = None            # don't retry every recording
+            return None
+
+    def live_view(self) -> dict:
+        s = self.session
+        return s.live_view() if s is not None else {"active": False, "finishing": self.finishing}
+
     @property
     def active(self) -> bool:
         return self.session is not None
@@ -381,7 +460,7 @@ class NotesManager:
         with self._lock:
             if self.session is not None:
                 raise RuntimeError("already taking notes")
-            session = NoteSession(kind, self._transcriber(), self.summarize, title)
+            session = NoteSession(kind, self._transcriber(), self.summarize, title, live=self._live())
             self.session = session
             if capture:
                 sources = ["system", "mic"] if kind == "meeting" and self.include_mic else \

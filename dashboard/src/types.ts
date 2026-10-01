@@ -51,7 +51,12 @@ export type OrbMode = "idle" | "listening" | "transcribing" | "thinking" | "spea
 export type NoteItem = {
   id: number; title: string; kind: string; started: string; ended: string; folder: string; summary: string; words: number;
 };
-export type NoteDetail = NoteItem & { notes_md: string; transcript_md: string };
+export type NoteDetail = NoteItem & { notes_md: string; transcript_md: string; summary_md: string };
 export type NotesStatus = {
   active: boolean; finishing: boolean; title?: string; kind?: string; elapsed_s?: number; words?: number; last?: string;
 };
+
+export type Pairing = { enabled: boolean; url: string; token: string; link: string; qr_svg: string; tailscale: boolean };
+
+export type LiveLine = { t: string; text: string };
+export type NotesLive = { active: boolean; final?: LiveLine[]; live?: LiveLine[]; partial?: string; captions?: boolean };

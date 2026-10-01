@@ -93,9 +93,15 @@ notes:
   # (meeting: laptop audio + mic). Only the transcript and notes are kept, never audio.
   enabled: true
   folder: ~/Documents/Max Notes
+  file: data/notes.md        # quick notes ("take a note: ...")
   # In meetings, also record your own voice from the mic (turn off if you use laptop
   # speakers and hear an echo in transcripts)
   include_mic_in_meetings: true
+  # Live captions while recording: words show up ~0.5 s after they're said (small streaming
+  # model, CPU). Rough at first; Whisper's accurate text replaces them every ~30 s, and only
+  # Whisper's text is saved.
+  live_captions: true
+  live_model: models/live/sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06
 
 dashboard:
   # Live dashboard + API (the phone/watch apps will use the same API in Phase 4)
@@ -104,6 +110,14 @@ dashboard:
   port: 8765
   # Speak replies to commands typed in the dashboard (off: typing usually means "be quiet")
   speak_typed_replies: false
+
+phone:
+  # Android app (Phase 4). The phone connects through Tailscale ("tailscale serve"), so the
+  # API itself stays on 127.0.0.1. Pair it by scanning the QR code in the dashboard.
+  enabled: true
+  public_url: ""            # blank = auto-detect https://<laptop>.<tailnet>.ts.net
+  token_file: data/phone_token.txt
+  approval_timeout_s: 90    # a risky phone command waits this long for your tap, then = no
 
 audio:
   sample_rate: 16000
@@ -149,9 +163,6 @@ safety:
   # Tools marked risky always need a spoken/typed "yes" first
   confirm_risky: true
   confirm_timeout_s: 8.0
-
-notes:
-  file: data/notes.md
 
 logging:
   file: logs/max.log

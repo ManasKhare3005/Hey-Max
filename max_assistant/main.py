@@ -12,6 +12,7 @@ import time
 from logging.handlers import RotatingFileHandler
 
 from .agent import Agent, parse_yes_no
+from .events import current_origin, set_origin
 from .config import load_config, resolve_path
 from .llm import OllamaClient
 from .tools import system as system_tools
@@ -92,13 +93,21 @@ def setup_logging(cfg, verbose: bool):
     )
 
 
-def build(cfg, confirm, on_event, bus=None):
+def build(cfg, confirm, on_event, bus=None, approvals=None):
     llm = OllamaClient(cfg.llm.host, cfg.llm.keep_alive, cfg.llm.temperature,
                        cfg.llm.get("think", False), cfg.llm.request_timeout_s,
                        num_ctx=cfg.llm.get("num_ctx"), num_predict=cfg.llm.get("num_predict"),
                        gpu_layers={cfg.llm.fast_model: cfg.llm.get("fast_model_gpu_layers")}
                        if cfg.llm.get("fast_model_gpu_layers") else None)
     ctx = Context(cfg, llm)
+    if approvals is not None:
+        local_confirm = confirm
+
+        def confirm(prompt: str) -> bool:
+            # A phone command is approved on the phone (a tap), never by the laptop's mic
+            if current_origin() == "phone":
+                return approvals.wait(prompt, (cfg.get("phone", {}) or {}).get("approval_timeout_s", 90))
+            return local_confirm(prompt)
     ctx.confirm = confirm
     mem_cfg = cfg.get("memory", {})
     if mem_cfg.get("enabled", True):
@@ -122,12 +131,15 @@ def build(cfg, confirm, on_event, bus=None):
             if ctx.stt is None:                        # text mode: load Whisper on first use
                 from .stt import SpeechToText
 
-                ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type)
+                ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
+                                       prompt=cfg.stt.get("prompt"))
             return ctx.stt.whisper
 
         folder = Path(os.path.expanduser(notes_cfg.get("folder", "~/Documents/Max Notes")))
         ctx.notes = NotesManager(ctx, transcriber, folder, on_event=on_event,
-                                 include_mic_in_meetings=notes_cfg.get("include_mic_in_meetings", True))
+                                 include_mic_in_meetings=notes_cfg.get("include_mic_in_meetings", True),
+                                 live_model_dir=resolve_path(notes_cfg["live_model"])
+                                 if notes_cfg.get("live_captions", True) and notes_cfg.get("live_model") else None)
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
     web_tools.register(registry)
@@ -240,7 +252,13 @@ def start_dashboard(cfg, ctx, bus, approvals, run_command, info, controls=None):
         from .server import Runtime, serve
 
         host, port = d.get("host", "127.0.0.1"), int(d.get("port", 8765))
-        server = serve(Runtime(ctx, bus, approvals, run_command, info, controls), host, port)
+        phone = cfg.get("phone", {}) or {}
+        token = ""
+        if phone.get("enabled", True):
+            from .remote import load_token
+
+            token = load_token(phone.get("token_file", "data/phone_token.txt"))
+        server = serve(Runtime(ctx, bus, approvals, run_command, info, controls, token), host, port)
         print(f"🖥  Dashboard: http://{host}:{port}")
         return server
     except Exception as exc:                   # the assistant works without it
@@ -265,14 +283,18 @@ def run_text(cfg, verbose: bool):
     bus = EventBus()
     approvals = ApprovalBroker(bus)
     agent_lock = threading.Lock()
-    ctx, llm, agent = build(cfg, confirm, event_printer(verbose), bus=bus)
+    ctx, llm, agent = build(cfg, confirm, event_printer(verbose), bus=bus, approvals=approvals)
     check_models(llm, cfg)
 
-    def run_command(text: str) -> str:
+    def run_command(text: str, source: str = "dashboard") -> str:
         with agent_lock:
-            bus.publish("heard", {"text": text, "source": "dashboard"})
-            reply = agent.handle(text)
-            print(f"\n(dashboard) you > {text}\n{cfg.assistant.name.lower()} > {reply}\nyou > ", end="")
+            bus.publish("heard", {"text": text, "source": source})
+            set_origin(source)
+            try:
+                reply = agent.handle(text)
+            finally:
+                set_origin("local")
+            print(f"\n({source}) you > {text}\n{cfg.assistant.name.lower()} > {reply}\nyou > ", end="")
             return reply
 
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, "(text mode)", "text"))
@@ -420,11 +442,11 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         if kind == "thinking" and data.get("step") == 0:
             turn["filler"] = False
         key = data.get("tool") if kind == "tool_call" else "__escalate__" if kind == "escalate" else None
-        if key in FILLERS and not turn["filler"]:
+        if key in FILLERS and not turn["filler"] and current_origin() != "phone":
             turn["filler"] = True
             threading.Thread(target=say, args=(FILLERS[key],), daemon=True).start()
 
-    ctx, llm, agent = build(cfg, confirm, on_event, bus=bus)
+    ctx, llm, agent = build(cfg, confirm, on_event, bus=bus, approvals=approvals)
     ctx.stt = stt
     announcements: queue.Queue[str] = queue.Queue()   # spoken reminders wait until Max is idle
     if ctx.notes is not None:
@@ -439,12 +461,16 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
 
         ctx.notes.on_done = notes_done
 
-    def run_command(text: str) -> str:
+    def run_command(text: str, source: str = "dashboard") -> str:
         with agent_lock:
-            bus.publish("heard", {"text": text, "source": "dashboard"})
-            reply = agent.handle(text)
-            print(f"⌨  (dashboard) you: {text}\n🤖 {cfg.assistant.name.lower()}: {reply}\n")
-            if cfg.get("dashboard", {}).get("speak_typed_replies", False):
+            bus.publish("heard", {"text": text, "source": source})
+            set_origin(source)
+            try:
+                reply = agent.handle(text)
+            finally:
+                set_origin("local")
+            print(f"⌨  ({source}) you: {text}\n🤖 {cfg.assistant.name.lower()}: {reply}\n")
+            if source == "dashboard" and cfg.get("dashboard", {}).get("speak_typed_replies", False):
                 announcements.put(reply)
             return reply
 
