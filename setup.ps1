@@ -91,6 +91,13 @@ if (-not (Test-Path (Join-Path $kwsDir "tokens.txt"))) {
     Move-Item (Join-Path $kwsParent $kwsName) $kwsDir
     Remove-Item $kwsArchive
 }
+# Voice ID: risky requests in other voices need a tap on your phone (speaker model, ~26 MB)
+$vidFile = Join-Path $PSScriptRoot "models\voiceid\eres2net_en_voxceleb.onnx"
+if (-not (Test-Path $vidFile)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $vidFile) | Out-Null
+    Invoke-WebRequest "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx" -OutFile $vidFile
+    Check "Downloading the voice ID model"
+}
 # Live captions while taking notes (streaming model, ~60 MB)
 $liveName = "sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
 $liveParent = Join-Path $PSScriptRoot "models\live"

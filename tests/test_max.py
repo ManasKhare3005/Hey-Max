@@ -1,4 +1,5 @@
 """Tests run anywhere: no mic, GPU, Ollama or Windows needed."""
+import sys
 import threading
 import time
 from pathlib import Path
@@ -1651,3 +1652,348 @@ def test_phone_api_results_state_and_connection_count():
         assert out == {"ok": True, "message": "Battery 80%."}
     assert not bridge.online
     assert phone.post("/api/phone/result", json={"id": 999, "message": "late"}, headers=auth).status_code == 404
+
+
+# ---------- speaking while thinking, and interrupting (speech.py) ----------
+
+def test_sentences_are_spoken_as_they_arrive_and_the_rest_at_the_end():
+    from max_assistant.speech import SentenceSpeaker
+
+    said = []
+    s = SentenceSpeaker(lambda t: said.append(t))
+    s.feed(None)
+    for piece in ["Two things are due", " this week. The project", " report is Friday at 11:59 PM.", " Also a qu", "iz on Monday"]:
+        s.feed(piece)
+    s._q.join()
+    assert said == ["Two things are due this week.", "The project report is Friday at 11:59 PM."]   # spoken early
+    assert s.finish("Two things are due this week. The project report is Friday at 11:59 PM. Also a quiz on Monday") is None
+    assert said[-1] == "Also a quiz on Monday"                                            # only the rest
+
+
+def test_a_claimed_action_halts_streaming_so_the_agent_can_correct_it():
+    from max_assistant.speech import SentenceSpeaker
+
+    said = []
+    s = SentenceSpeaker(lambda t: said.append(t))
+    s.feed(None)
+    s.feed("Sure. I'll remind you tomorrow. Anything else? ")
+    s._q.join()
+    assert said == ["Sure."]
+    s.feed(None)                                     # the nudged second attempt
+    s.feed("Okay, I'll remind you tomorrow at 7 AM.")
+    s.finish("Okay, I'll remind you tomorrow at 7 AM.")
+    assert said[-1] == "Okay, I'll remind you tomorrow at 7 AM."
+
+
+def test_interrupting_stops_the_remaining_sentences():
+    from max_assistant.speech import SentenceSpeaker
+
+    said = []
+    s = SentenceSpeaker(lambda t: said.append(t) or ("stop" if len(said) == 1 else None))
+    s.feed(None)
+    s.feed("First sentence. Second sentence. Third ")
+    assert s.finish("First sentence. Second sentence. Third sentence.") == "stop"
+    assert said == ["First sentence."]
+
+
+def test_watch_for_interrupt_ignores_maxs_own_words():
+    from max_assistant.speech import watch_for_interrupt
+
+    frames = iter(["a", "b", "c", "d"])
+    heard = iter([None, "STOP", None, "HEY_MAX"])
+    read = lambda timeout: next(frames, None)
+    assert watch_for_interrupt(read, lambda f: next(heard), 5, "Take the bus to the next stop.") == "wake"
+    frames, heard = iter(["a"]), iter(["MAX_STOP"])
+    assert watch_for_interrupt(lambda t: next(frames, None), lambda f: next(heard), 5, "Here you go.") == "stop"
+    assert watch_for_interrupt(lambda t: None, lambda f: None, 0.05, "Quiet.") is None
+
+
+def test_converse_after_an_interrupt():
+    from max_assistant.main import converse
+
+    replies = iter(["Here's a long answer?", "Sure."])
+    cut = iter(["wake", None])
+    log = []
+    n = converse("tell me about rdf", lambda t: log.append(t) or next(replies), lambda: "should not be used",
+                 interrupted=lambda: next(cut), listen_new=lambda: "actually what's the weather")
+    assert n == 2 and log == ["tell me about rdf", "actually what's the weather"]
+    n = converse("tell me about rdf", lambda t: "Is that all?", lambda: "unused", interrupted=lambda: "stop")
+    assert n == 1
+
+
+def test_llm_streams_text_and_still_returns_tool_calls(monkeypatch):
+    import json as _json
+
+    from max_assistant import llm as L
+
+    lines = [{"message": {"content": "Hello"}}, {"message": {"content": " there."}},
+             {"message": {"content": "", "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "x"}}}]}},
+             {"done": True, "message": {"content": ""}}]
+
+    class R:
+        status_code = 200
+        text = ""
+        def iter_lines(self):
+            return [_json.dumps(l).encode() for l in lines]
+
+    monkeypatch.setattr(L.requests, "post", lambda url, json, timeout, **kw: R())
+    pieces = []
+    reply = L.OllamaClient("http://x").chat("m", [], on_text=pieces.append)
+    assert pieces == ["Hello", " there."] and reply.content == "Hello there."
+    assert reply.tool_calls[0].name == "web_search"
+
+
+def test_agent_does_not_stream_while_a_requested_tool_is_pending():
+    reg, ctx = memory_registry()
+    agent = Agent(FakeLLM([]), reg, "fast", "planner")
+    assert agent._stream_for(print, "remind me about gym tomorrow", []) is None
+    assert agent._stream_for(print, "what is rdf", []) is print
+    assert agent._stream_for(None, "what is rdf", []) is None
+
+
+# ---------- deadline countdown (alerts.py) ----------
+
+def test_deadline_alerts_fire_once_per_window_and_for_classes():
+    import datetime as dt
+
+    from max_assistant.alerts import DeadlineAlerts
+    from max_assistant.canvas import CanvasItem
+
+    now = dt.datetime(2026, 10, 1, 9, 0)
+    lab = CanvasItem("assignment", "Lab 4", "CSE 572", dt.datetime(2026, 10, 1, 23, 59), True, url="https://canvas/lab4")
+    quiz = CanvasItem("assignment", "Quiz 3", "CSE 579", dt.datetime(2026, 10, 2, 10, 0), False)
+    cls = CanvasItem("class", "Semantic Web Mining", "CSE 573", dt.datetime(2026, 10, 1, 9, 8), False, link="https://asu.zoom.us/j/1")
+
+    class Feed:
+        def between(self, start, end, kind=None):
+            return [i for i in (lab, quiz, cls) if start <= i.start < end]
+
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.memory, ctx.canvas = memory_store(), Feed()
+    events = []
+    alerts = DeadlineAlerts(ctx, lambda kind, data: events.append(data))
+    out = alerts.check(now)
+    titles = sorted(a["title"] for a in out)
+    assert titles == ["Class in 8 minutes: Semantic Web Mining", "Due in 15 hours: Lab 4"]
+    cls_alert = next(a for a in out if a["kind"] == "class")
+    assert cls_alert["url"] == "https://asu.zoom.us/j/1" and "tap to join" in cls_alert["text"]
+    assert alerts.check(now + dt.timedelta(minutes=1)) == []                       # once only
+    later = alerts.check(dt.datetime(2026, 10, 1, 21, 30))                          # 2.5 h before the lab
+    assert sorted(a["title"] for a in later) == ["Due in 12 hours: Quiz 3", "Due in 2 hours: Lab 4"]
+    late = DeadlineAlerts(ctx, lambda k, d: None)                                   # laptop was off: only the 3 h alert
+    ctx.memory.set("alerts_sent", "[]")
+    assert [a["title"] for a in late.check(dt.datetime(2026, 10, 2, 8, 0)) if "Quiz" in a["title"]] == ["Due in 2 hours: Quiz 3"]
+
+
+# ---------- privacy page ----------
+
+def test_privacy_page_lists_exports_and_deletes(tmp_path):
+    import io
+    import zipfile
+
+    client, rt = api_client()
+    cfg = rt.ctx.cfg
+    cfg["notes"] = {**(cfg.get("notes") or {}), "folder": str(tmp_path / "Max Notes"), "file": str(tmp_path / "quick.md")}
+    cfg["browser"] = {**(cfg.get("browser") or {}), "profile_dir": str(tmp_path / "profile")}
+    m = rt.ctx.memory
+    m.add_fact("Manas's exam is on Friday")
+    m.log_turn("hi", "Hello!")
+    folder = tmp_path / "Max Notes" / "2026-10-01 Lecture"
+    folder.mkdir(parents=True)
+    (folder / "notes.md").write_text("# Lecture\n- RDF", encoding="utf-8")
+    m.add_notes("Lecture", "lecture", "2026-10-01T10:00", "2026-10-01T11:00", str(folder), "RDF", 10)
+    (tmp_path / "quick.md").write_text("- buy milk", encoding="utf-8")
+    (tmp_path / "profile").mkdir()
+    (tmp_path / "profile" / "Cookies").write_bytes(b"x" * 10)
+
+    cats = {c["id"]: c for c in client.get("/api/privacy").json()}
+    assert cats["facts"]["amount"] == "1 facts" and cats["conversations"]["amount"] == "1 turns"
+    z = zipfile.ZipFile(io.BytesIO(client.get("/api/privacy/export").content))
+    names = z.namelist()
+    assert "facts.json" in names and "notes/2026-10-01 Lecture/notes.md" in names and "quick_notes.md" in names
+    assert not any("Cookies" in n or "token" in n for n in names)                   # secrets stay out
+    assert "Friday" in z.read("facts.json").decode()
+
+    assert client.post("/api/privacy/delete/facts", json={"confirm": "nope"}).status_code == 400
+    assert client.post("/api/privacy/delete/facts", json={"confirm": "facts"}).json()["ok"]
+    assert m.count("facts") == 0 and m.search_facts("exam") == []
+    client.post("/api/privacy/delete/notes", json={"confirm": "notes"})
+    assert not folder.exists() and m.count("notes") == 0
+    client.post("/api/privacy/delete/browser", json={"confirm": "browser"})
+    assert not (tmp_path / "profile").exists()
+    assert client.post("/api/privacy/delete/bogus", json={"confirm": "bogus"}).status_code == 404
+    phone, _ = api_client(token="t" * 40, client=("100.64.0.7", 40000))
+    assert phone.get("/api/privacy", headers={"Authorization": "Bearer " + "t" * 40}).status_code == 403   # never over the phone link
+
+
+# ---------- ask your course material (course.py) ----------
+
+def make_course_files(root):
+    import docx
+    import pymupdf
+    from pptx import Presentation
+
+    (root / "CSE 573").mkdir(parents=True)
+    (root / "CSE 572").mkdir()
+    pdf = pymupdf.open()
+    for text in ["Week 1 overview of the semantic web course.",
+                 "SPARQL OPTIONAL keeps results even when the optional pattern has no match, leaving the variable unbound."]:
+        pdf.new_page().insert_text((72, 72), text)
+    pdf.save(str(root / "CSE 573" / "Lab 3 handout.pdf"))
+    pres = Presentation()
+    s = pres.slides.add_slide(pres.slide_layouts[1])
+    s.shapes.title.text = "RDF Schema"
+    s.placeholders[1].text = "RDFS adds classes, subclasses and domain and range constraints to RDF vocabularies."
+    pres.save(str(root / "CSE 573" / "Lecture 5.pptx"))
+    d = docx.Document()
+    d.add_paragraph("The midterm covers decision trees, entropy and information gain, and k-means clustering.")
+    d.save(str(root / "CSE 572" / "Midterm review.docx"))
+    (root / "CSE 572" / "~$Midterm review.docx").write_text("lock file", encoding="utf-8")   # Word's temp file: skipped
+
+
+def test_course_library_indexes_files_and_answers_with_sources(tmp_path):
+    from max_assistant.course import CourseLibrary
+
+    make_course_files(tmp_path / "Course")
+    lib = CourseLibrary([tmp_path / "Course"], WordEmbedder(), tmp_path / "course.db")
+    assert lib.scan()["indexed"] == 3
+    hit = lib.search("what does SPARQL OPTIONAL do when there is no match")[0]
+    assert (hit.file, hit.page, hit.course) == ("Lab 3 handout.pdf", "p. 2", "CSE 573")
+    assert lib.search("rdfs domain range constraints")[0].page == "slide 1"
+    assert lib.search("midterm entropy information gain", course="CSE 572")[0].file == "Midterm review.docx"
+    assert lib.scan()["indexed"] == 0                                  # unchanged files aren't re-read
+    (tmp_path / "Course" / "CSE 572" / "Midterm review.docx").unlink()
+    assert lib.scan()["removed"] == 1
+    assert lib.stats()["courses"] == {"CSE 573": 2}
+    lib.clear()
+    assert lib.search("SPARQL") == [] and lib.stats()["passages"] == 0
+
+
+def test_course_tools_give_the_model_cited_passages(tmp_path):
+    from max_assistant.course import CourseLibrary
+    from max_assistant.tools import course as course_tools
+
+    make_course_files(tmp_path / "Course")
+    reg = make_registry(tmp_path)
+    reg.context.course = lib = CourseLibrary([tmp_path / "Course"], WordEmbedder(), tmp_path / "course.db")
+    course_tools.register(reg)
+    assert reg.run("course_files", {}).startswith("No course files yet")
+    lib.scan()
+    out = reg.run("course_search", {"question": "SPARQL OPTIONAL no match"})
+    assert "[Lab 3 handout.pdf, p. 2]" in out and "say where it's from" in out
+    assert reg.run("course_files", {}) == "I have 3 files: 1 for CSE 572, 2 for CSE 573."
+    assert reg.run("course_search", {"question": "photosynthesis in plants"}).startswith("Nothing in the course files")
+
+
+# ---------- only the tools a request needs (toolselect.py) ----------
+
+def test_tool_selection_keeps_requests_small_and_relevant(tmp_path):
+    from max_assistant.events import EventBus
+    from max_assistant.phone import PhoneBridge
+    from max_assistant.tools import phone as phone_tools
+    from max_assistant.tools.memory import register as memory_register
+    from max_assistant.toolselect import CORE, ToolSelector
+
+    reg, ctx = memory_registry()
+    system_tools.register(reg)
+    ctx.phone = PhoneBridge(EventBus())
+    phone_tools.register(reg)
+    sel = ToolSelector(reg, WordEmbedder())
+    total = len(reg.tools)
+    names = sel.select("set a timer for 10 minutes on my phone")
+    assert "phone_timer" in names and "phone_call" in names and len(names) < total   # the whole phone family
+    assert names[:len([c for c in CORE if c in reg.tools])] == [c for c in CORE if c in reg.tools]
+    assert "set_reminder" in sel.select("remind me to call mom at 6")
+    assert "browser_click" not in sel.select("what's the weather")
+    follow = sel.select("the second one", recent_tools=["phone_message"])
+    assert "phone_message" in follow                                                   # follow-ups keep their tools
+    assert len(ToolSelector(reg, WordEmbedder(), max_tools=8).select("remind me on my phone to remember things")) <= 15
+
+
+def test_context_overflow_retries_without_old_conversation():
+    from max_assistant.llm import OllamaError
+
+    class Overflow(FakeLLM):
+        def chat(self, model, messages, tools=None, **kw):
+            if len(messages) > 3:
+                self.calls.append({"messages": list(messages)})
+                raise OllamaError("Ollama error 400: request (4315 tokens) exceeds the available context size")
+            return super().chat(model, messages, tools)
+
+    reg, ctx = memory_registry()
+    llm = Overflow([ChatReply("Hi again.")])
+    agent = Agent(llm, reg, "fast", "planner")
+    agent.history = [[{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "ok"}]]
+    agent._last_turn = time.monotonic()
+    assert agent.handle("hello") == "Hi again."
+
+
+# ---------- read my screen (tools/screen.py) ----------
+
+def test_read_screen_reads_text_and_keeps_nothing(tmp_path, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows OCR")
+    from PIL import Image, ImageDraw, ImageFont
+
+    from max_assistant.tools import screen as screen_tools
+
+    img = Image.new("RGB", (1000, 220), "white")
+    d = ImageDraw.Draw(img)
+    font = ImageFont.truetype("consola.ttf", 26)
+    d.text((20, 40), "TypeError: unsupported operand type(s) for +: 'int' and 'str'", fill="black", font=font)
+    d.text((20, 110), 'File "app.py", line 12, in total', fill="black", font=font)
+    monkeypatch.setattr(screen_tools, "capture", lambda whole=False: (img, "app.py - VS Code"))   # never the real screen
+    reg = make_registry(tmp_path)
+    screen_tools.register(reg)
+    out = reg.run("read_screen", {"question": "what does this error mean?"})
+    assert "unsupported operand" in out and "app.py - VS Code" in out and "what does this error mean?" in out
+    monkeypatch.setattr(screen_tools, "capture", lambda whole=False: (Image.new("RGB", (400, 200), "white"), "blank"))
+    assert reg.run("read_screen", {"question": "?"}) == "I couldn't find any text in that window."
+
+
+# ---------- command accuracy test (evals.py) ----------
+
+def test_eval_cases_load_and_judging():
+    from max_assistant.evals import judge, load_cases, summarize
+
+    cases = load_cases()
+    assert len(cases) >= 80 and all(t["expect"] for c in cases for t in c["turns"])
+    turn = {"expect": ["phone_timer"], "args": {"duration": "10"}}
+    assert judge(turn, [("phone_timer", {"duration": "10 minutes"})]) == (True, True, "")
+    assert judge(turn, [("phone_timer", {"duration": "5 minutes"})])[:2] == (True, False)
+    assert judge(turn, [("set_reminder", {})])[0] is False
+    assert judge({"expect": ["none"], "args": {}}, []) == (True, True, "")
+    s = summarize([{"category": "a", "tool_ok": True, "args_ok": False, "seconds": 1.0, "prompt_tokens": 100},
+                   {"category": "a", "tool_ok": True, "args_ok": True, "seconds": 3.0, "prompt_tokens": 300}])
+    assert s["tool_accuracy"] == 1.0 and s["full_accuracy"] == 0.5 and s["categories"]["a"] == {"n": 2, "tool": 2, "full": 1}
+
+
+# ---------- voice ID (voiceid.py) ----------
+
+def test_voice_id_tells_the_user_from_other_voices(tmp_path):
+    from max_assistant.config import ROOT
+    from max_assistant.tts import PiperTTS
+    from max_assistant.voiceid import VoiceID
+
+    model = ROOT / "models/voiceid/eres2net_en_voxceleb.onnx"
+    voice = ROOT / "models/piper/en_US-ryan-medium.onnx"
+    if not (model.exists() and voice.exists()):
+        pytest.skip("voice ID model or Piper voice not downloaded")
+    ryan = PiperTTS(str(voice))
+
+    def say(line, pitch=1.0):
+        a, sr = ryan.synthesize(line)
+        t = np.arange(0, len(a) / sr, 1 / 16000)
+        x = np.interp(t * pitch, np.arange(len(a)) / sr, a).astype(np.float32)   # resampled = a different-sounding voice
+        return x
+
+    vid = VoiceID(model, tmp_path / "profile.npy")
+    assert vid.score(say("hello there")) is None and not vid.enrolled            # nothing enrolled yet
+    vid.enroll([say(l) for l in ["What's due this week?", "Remind me to call mom tomorrow.", "Open Spotify please.",
+                                 "Take notes for this lecture."]])
+    assert vid.enrolled and (tmp_path / "profile.npy").exists()
+    assert vid.is_owner(say("Shut down the laptop now.")) is True
+    assert vid.score(np.zeros(4000, np.float32)) is None                          # too short to judge
+    assert VoiceID(model, tmp_path / "profile.npy").enrolled                      # saved and reloaded
+    vid.forget()
+    assert not vid.enrolled and not (tmp_path / "profile.npy").exists()

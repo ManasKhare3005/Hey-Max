@@ -137,6 +137,12 @@ class MaxService : Service() {
                 }
                 Hub.approvals.value = open.values.toList()
                 open.values.forEach { notifyApproval(it) }
+                // Deadline alerts sent while the phone was offline (last 3 hours), each shown once
+                val cutoff = System.currentTimeMillis() / 1000.0 - 3 * 3600
+                for (i in 0 until (recent?.length() ?: 0)) {
+                    val e = recent!!.getJSONObject(i)
+                    if (e.optString("kind") == "alert" && e.optDouble("ts") > cutoff) showAlert(e.optDouble("ts"), e.optJSONObject("data") ?: continue)
+                }
             }
             "stage" -> Hub.stage.value = data.optString("stage")
             "approval_request" -> {
@@ -157,6 +163,7 @@ class MaxService : Service() {
                 "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
             }
             "phone_open" -> openLink(data.optString("url"), data.optString("title"))
+            "alert" -> showAlert(event.optDouble("ts"), data)
             "phone_action" -> {
                 val api = MaxApi.from(Prefs(this)) ?: return
                 val id = data.optInt("id")
@@ -170,6 +177,29 @@ class MaxService : Service() {
             }
         }
         Hub.events.tryEmit(MaxEvent(kind, data))
+    }
+
+    /** Deadline countdown: "Due in 3 hours: Lab 4", "Class in 10 minutes: ..." (tap opens the link). */
+    private fun showAlert(ts: Double, data: JSONObject) {
+        val prefs = Prefs(this)
+        val at = (ts * 1000).toLong()
+        if (at <= prefs.lastAlertAt) return
+        prefs.lastAlertAt = at
+        val eventId = (at % 1_000_000).toInt()
+        val uri = runCatching { android.net.Uri.parse(data.optString("url")) }.getOrNull()
+        val tap = if (uri != null && (uri.scheme == "https" || uri.scheme == "http"))
+            PendingIntent.getActivity(this, eventId, Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        else openApp()
+        nm.notify(nextId++, NotificationCompat.Builder(this, MaxApp.CH_REMINDER)
+            .setSmallIcon(R.drawable.ic_stat_max)
+            .setContentTitle(data.optString("title"))
+            .setContentText(data.optString("text"))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .setContentIntent(tap)
+            .build())
     }
 
     /** "Show me cute dog photos" from the phone: open the page here, or offer it as a notification. */

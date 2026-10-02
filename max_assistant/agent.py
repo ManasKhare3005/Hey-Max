@@ -70,7 +70,45 @@ INTENTS = {
     "remember": re.compile(r"^\W*(please\s+|can you\s+)*remember\s+(that|my|this)\b", re.I),
     "open_website": re.compile(r"\b(show|open|pull up|bring up|search|look up|find|google)\b.*"
                                r"\b(photos?|pictures?|pics?|images?|wallpapers?|website|site|web ?page)\b", re.I),
+    # "text alex on whatsapp I'm running late": the model once answered as if reading a message
+    # (needs a name and some message words; "text alex" alone may fairly get "what should I say?")
+    "phone_message": re.compile(r"^\W*(please\s+|can you\s+|could you\s+)*(text|message|whatsapp|sms)\s+(?!me\b)\w+(\s+\S+){2,}", re.I),
+    # "what does this error mean?": the model asked "what does the error say?" instead of looking
+    "read_screen": re.compile(r"\b(this|that) (error|message|page|window|warning|popup|pop-up|dialog)\b|\bon (my|the) screen\b|"
+                              r"\bread (my|the) screen\b|\bwhat am i looking at\b", re.I),
+    # Found by the command accuracy test (evals/commands.yaml): the model answered without acting
+    "volume": re.compile(r"^\W*(mute|unmute)\b|\b(volume (up|down)|louder|quieter|turn (it|the volume|the sound) (up|down))\b", re.I),
+    "media_control": re.compile(r"\b(skip|next) (this |the )?(song|track)\b|\b(previous|last) (song|track)\b|"
+                                r"\b(pause|resume|stop) (the )?(music|song|spotify)\b", re.I),
+    "email_digest": re.compile(r"\b(email|send) me (my|the|today'?s)? ?(summary|digest|day)\b", re.I),
+    "phone_calendar_add": re.compile(r"\b(add|put|schedule)\b.+\b(to|on|in) my calendar\b", re.I),
+    "phone_email": re.compile(r"^\W*(please\s+|can you\s+)*(email|e-mail)\s+(?!me\b)\w+(\s+\S+){2,}", re.I),
+    "find_files": re.compile(r"\bopen my (resume|cv|report|essay|thesis|cover letter|transcript)\b|"
+                             r"\bfind (my|the) .*\b(file|pdf|doc|document|presentation|spreadsheet)\b", re.I),
 }
+# Requests that already contain everything the tool needs: a question back doesn't excuse skipping it
+COMPLETE_INTENTS = {"phone_message", "read_screen", "volume", "media_control", "email_digest", "phone_calendar_add",
+                    "phone_email", "find_files", "cancel_reminder"}
+# ...but only when they say which: "cancel my reminder" alone may fairly get "which one?"
+COMPLETE_ONLY_IF = {"cancel_reminder": re.compile(r"\breminders? (about|for|to)\s+\w+", re.I)}
+# Details the model drops but the user clearly said: "search YouTube for lofi" -> site=youtube
+SITE_WORDS = re.compile(r"\b(youtube|amazon|reddit|github|wikipedia|ebay|netflix|spotify)\b", re.I)
+
+
+def repair_args(name: str, args: dict, user_text: str) -> dict:
+    if name == "media_control":
+        if re.search(r"\b(skip|next)\b", user_text, re.I):
+            args = {**args, "action": "next"}
+        elif re.search(r"\b(previous|go back|last (song|track))\b", user_text, re.I):
+            args = {**args, "action": "previous"}
+    if name == "open_website" and not args.get("site"):
+        m = SITE_WORDS.search(user_text)
+        target = str(args.get("target", "")).lower()
+        if m and not re.match(r"^(https?://)?[\w-]+(\.[\w-]+)+", target) and m.group(1).lower() not in target.split(".")[0]:
+            args = {**args, "site": m.group(1).lower()}
+            if args.get("section") == "videos":
+                args.pop("section")
+    return args
 # Max's Chrome window is on the laptop: from the phone, pages are opened on the phone instead
 PHONE_NOTE = ("(Sent from the user's phone. Apps on the phone: phone_open_app (and the other phone_ tools for calls, "
               "texts, alarms, maps, music). Websites, searches and videos: open_website, which opens them on the phone "
@@ -139,6 +177,7 @@ class Agent:
         history_chars: int = 4000,
         recall: Callable[[str], str | None] | None = None,
         on_turn: Callable[[str, str, list[str]], None] | None = None,
+        tool_selector=None,
     ):
         self.llm = llm
         self.registry = registry
@@ -156,7 +195,8 @@ class Agent:
         self.history: list[list[dict]] = []
         self.history_turns = history_turns
         self.history_ttl_s = history_ttl_s
-        self.history_chars = history_chars    # ~1k tokens: system + tools already use ~2.3k of 4k
+        self.history_chars = history_chars    # ~1k tokens of history
+        self.tool_selector = tool_selector    # toolselect.ToolSelector: only the tools a request needs
         self._last_turn = 0.0
         self.recall = recall          # relevant saved facts for a request (memory), or None
         self.on_turn = on_turn        # called after each turn: (user_text, answer, tools used)
@@ -187,7 +227,9 @@ class Agent:
             return {**msg, "content": content[:limit].rsplit(" ", 1)[0] + " …"}
         return msg
 
-    def handle(self, user_text: str) -> str:
+    def handle(self, user_text: str, on_text=None) -> str:
+        """`on_text(piece)` streams the model's words as they're written (`None` marks a new
+        model call); voice mode speaks the first sentence while the rest is still coming."""
         d = dt.datetime.now()
         now = f"{d:%a %b} {d.day} {d.year}, {d.hour % 12 or 12}:{d:%M %p}"   # no leading zeros: read aloud
         content = f"[{now}] {user_text}"
@@ -202,7 +244,9 @@ class Agent:
         turn_start = len(messages) - 1
         nudged = False
         model = self.fast_model
-        tools = self.registry.schemas() + [ESCALATE_TOOL]
+        self._user_text = user_text
+        names = self._tool_names(user_text)
+        tools = self.registry.schemas(names) + [ESCALATE_TOOL]
         answer = None
 
         try:
@@ -217,7 +261,19 @@ class Agent:
                 answer = "Okay, I won't." if result == DECLINED else result
             for step in range(0 if route else self.max_steps):
                 self.on_event("thinking", {"model": model, "step": step})
-                reply = self.llm.chat(model, messages, tools)
+                stream = self._stream_for(on_text, user_text, messages[turn_start:])
+                if stream is not None:
+                    stream(None)
+                try:
+                    reply = self.llm.chat(model, messages, tools, **({"on_text": stream} if stream else {}))
+                except OllamaError as exc:
+                    if "context" not in str(exc) or turn_start <= 1:
+                        raise
+                    # Too big for the model's window: drop the earlier conversation and try once more
+                    log.warning("prompt too long; retrying without the earlier conversation")
+                    messages = [messages[0], *messages[turn_start:]]
+                    turn_start = 1
+                    reply = self.llm.chat(model, messages, tools, **({"on_text": stream} if stream else {}))
 
                 if not reply.tool_calls:
                     answer = strip_thinking(reply.content)
@@ -227,6 +283,9 @@ class Agent:
                         # the tool, so nothing happened. Tell it so, once.
                         nudged = True
                         log.info("reply claims %s without calling it; nudging", claimed)
+                        if names is not None and claimed not in names:      # make sure it can call it now
+                            names += [t for t in self.tool_selector.members(self.tool_selector.family(claimed)) if t not in names] or [claimed]
+                            tools = self.registry.schemas(names) + [ESCALATE_TOOL]
                         messages += [{"role": "assistant", "content": answer},
                                      {"role": "user", "content": f"(System check: you said that, but you didn't call "
                                       f"the {claimed} tool, so nothing actually happened. Call {claimed} now; it looks things up "
@@ -246,12 +305,23 @@ class Agent:
                     result = self._run_call(call.name, call.arguments, model)
                     if result == "__ESCALATE__":
                         model = self.planner_model
-                        tools = self.registry.schemas()
+                        tools = self.registry.schemas(names)
                         result = "You are now the larger model. Solve the user's request directly."
                     messages.append({"role": "tool", "content": result, "tool_name": call.name})
                     if spoken is not None:
                         spoken = self._direct_reply(call.name, result, spoken)
 
+                pending = self._pending_intent(user_text, messages[turn_start:]) if spoken and not nudged else None
+                if pending:
+                    # e.g. "email me my summary" ran the spoken summary: the email still hasn't gone
+                    nudged = True
+                    log.info("direct reply but %s was asked for and not called; nudging", pending)
+                    if names is not None and pending not in names:
+                        names += [t for t in self.tool_selector.members(self.tool_selector.family(pending)) if t not in names] or [pending]
+                        tools = self.registry.schemas(names) + [ESCALATE_TOOL]
+                    messages.append({"role": "user", "content": f"(System check: the user asked for {pending}, which "
+                                     f"hasn't been called yet. Call {pending} now.)"})
+                    continue
                 if spoken and not COMPOUND.search(user_text):
                     # Tool results are already the answer ("Opened Spotify."): skip the LLM round trip
                     answer = " ".join(spoken)
@@ -284,12 +354,49 @@ class Agent:
         for tool, pattern in CLAIMS.items():
             if tool not in called and tool in self.registry.tools and pattern.search(answer):
                 return tool
-        if answer.rstrip().endswith("?"):       # asking for details is fine
-            return None
+        asking = answer.rstrip().endswith("?")   # asking for details is fine...
         for tool, pattern in INTENTS.items():
             if tool not in called and tool in self.registry.tools and pattern.search(user_text):
+                if asking and not self._complete(tool, user_text):
+                    continue
+                return tool                      # ...unless the request already had everything needed
+        return None
+
+    def _tool_names(self, user_text: str) -> list[str] | None:
+        """Tools to offer for this request (None = all), plus the ones used in the last two turns."""
+        if self.tool_selector is None:
+            return None
+        recent = [c["function"]["name"] for t in self.history[-2:] for m in t for c in m.get("tool_calls", [])]
+        names = self.tool_selector.select(user_text, recent)
+        log.debug("tools offered: %s", names)
+        return names
+
+    @staticmethod
+    def _complete(tool: str, user_text: str) -> bool:
+        """The request already had everything the tool needs (no reason to ask back)."""
+        if tool not in COMPLETE_INTENTS:
+            return False
+        extra = COMPLETE_ONLY_IF.get(tool)
+        return extra is None or bool(extra.search(user_text))
+
+    def _pending_intent(self, user_text: str, turn: list[dict]) -> str | None:
+        """A complete, clear request whose tool this turn hasn't called (checked before a direct reply)."""
+        called = {c["function"]["name"] for m in turn for c in m.get("tool_calls", [])}
+        for tool, pattern in INTENTS.items():
+            if tool not in called and tool in self.registry.tools and pattern.search(user_text) and self._complete(tool, user_text):
                 return tool
         return None
+
+    def _stream_for(self, on_text, user_text: str, turn: list[dict]):
+        """Stream this model call only when nothing is likely to need correcting: not while a
+        clear request (remember, remind, open...) is still waiting for its tool."""
+        if on_text is None:
+            return None
+        called = {c["function"]["name"] for m in turn for c in m.get("tool_calls", [])}
+        for tool, pattern in INTENTS.items():
+            if tool not in called and tool in self.registry.tools and pattern.search(user_text):
+                return None
+        return on_text
 
     def _direct_reply(self, name: str, result: str, spoken: list[str]) -> list[str] | None:
         """Add a tool's result to the spoken reply, or return None if the LLM must answer."""
@@ -324,7 +431,8 @@ class Agent:
                 return DECLINED
 
         self.on_event("tool_call", {"tool": name, "args": args})
-        result = self.registry.run(name, args or {})
+        args = repair_args(name, args or {}, getattr(self, "_user_text", ""))
+        result = self.registry.run(name, args)
         self.on_event("tool_result", {"tool": name, "result": result})
         log.info("tool %s(%s) -> %s", name, args, result[:200])
         return result

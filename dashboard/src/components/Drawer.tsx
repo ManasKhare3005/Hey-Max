@@ -4,8 +4,10 @@ import type { Fact, Reminder } from "../types";
 import { relative, whenLabel } from "../format";
 import NotesTab from "./NotesTab";
 import PhoneTab from "./PhoneTab";
+import PrivacyTab from "./PrivacyTab";
+import AccuracyTab from "./AccuracyTab";
 
-export type Tab = "memory" | "reminders" | "notes" | "phone";
+export type Tab = "memory" | "reminders" | "notes" | "phone" | "privacy" | "accuracy";
 type Props = { open: Tab | null; onClose: () => void; onTab: (t: Tab) => void; revision: number };
 
 export default function Drawer({ open, onClose, onTab, revision }: Props) {
@@ -25,6 +27,8 @@ export default function Drawer({ open, onClose, onTab, revision }: Props) {
             <button className={open === "reminders" ? "active" : ""} onClick={() => onTab("reminders")}>⏰ Reminders</button>
             <button className={open === "notes" ? "active" : ""} onClick={() => onTab("notes")}>✍ Notes</button>
             <button className={open === "phone" ? "active" : ""} onClick={() => onTab("phone")}>▯ Phone</button>
+            <button className={open === "privacy" ? "active" : ""} onClick={() => onTab("privacy")}>⛨ Privacy</button>
+            <button className={open === "accuracy" ? "active" : ""} onClick={() => onTab("accuracy")}>◎ Accuracy</button>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
         </div>
@@ -32,6 +36,8 @@ export default function Drawer({ open, onClose, onTab, revision }: Props) {
         {open === "reminders" && <RemindersTab revision={revision} />}
         {open === "notes" && <NotesTab revision={revision} />}
         {open === "phone" && <PhoneTab />}
+        {open === "privacy" && <PrivacyTab />}
+        {open === "accuracy" && <AccuracyTab />}
       </aside>
     </>
   );

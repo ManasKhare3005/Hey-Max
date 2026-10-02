@@ -28,3 +28,7 @@ uvicorn[standard]>=0.29
 pytest
 httpx
 qrcode>=7.4            # phone pairing QR code (dashboard)
+pymupdf>=1.24          # course material: PDF text (and doc renders)
+python-pptx>=1.0       # course material: slides
+python-docx>=1.1       # course material: Word files
+winocr>=0.0.13          # read my screen: Windows' built-in OCR

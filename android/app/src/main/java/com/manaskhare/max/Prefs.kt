@@ -19,6 +19,12 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("speak", true)
         set(v) = sp.edit().putBoolean("speak", v).apply()
 
+    /** Time (ms) of the last deadline alert shown, so alerts missed while offline are shown once.
+     *  (Event ids restart when Max restarts; timestamps don't.) */
+    var lastAlertAt: Long
+        get() = sp.getLong("lastAlertAt", 0L)
+        set(v) = sp.edit().putLong("lastAlertAt", v).apply()
+
     val paired: Boolean get() = url.isNotBlank() && token.isNotBlank()
 
     fun clear() = sp.edit().remove("url").remove("token").apply()

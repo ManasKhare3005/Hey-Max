@@ -62,6 +62,10 @@ class Speak(BaseModel):
     text: str
 
 
+class Confirm(BaseModel):
+    confirm: str = ""
+
+
 class PhoneResult(BaseModel):
     id: int
     ok: bool = True
@@ -242,6 +246,44 @@ def create_app(rt: Runtime) -> FastAPI:
             rt.bus.unsubscribe(q)
             if phone is not None:
                 phone.connected(-1)
+
+    # ----- command accuracy test results (evals.py) -----
+    @app.get("/api/evals")
+    def evals_results():
+        from . import evals
+
+        return {"runs": evals.runs(), "latest": evals.latest()}
+
+    # ----- privacy page: what Max keeps, export, delete (laptop only) -----
+    @app.get("/api/privacy")
+    def privacy(request: Request):
+        local_only(request)
+        from .privacy import Privacy
+
+        return Privacy(rt.ctx).categories()
+
+    @app.get("/api/privacy/export")
+    def privacy_export(request: Request):
+        local_only(request)
+        from .privacy import Privacy
+
+        name = f"max-data-{time.strftime('%Y-%m-%d')}.zip"
+        return Response(Privacy(rt.ctx).export(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.post("/api/privacy/delete/{category}")
+    def privacy_delete(category: str, body: Confirm, request: Request):
+        local_only(request)
+        from .privacy import Privacy
+
+        if body.confirm != category:                 # the page sends the category name again to confirm
+            raise HTTPException(400, "confirm by sending the category name")
+        try:
+            message = Privacy(rt.ctx).delete(category)
+        except KeyError:
+            raise HTTPException(404, f"unknown category {category}")
+        rt.bus.publish("privacy", {"deleted": category})
+        return {"ok": True, "message": message}
 
     # ----- the phone carrying out Max's actions (phone.py) -----
     def bridge():

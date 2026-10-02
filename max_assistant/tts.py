@@ -83,10 +83,15 @@ class Speaker:
         if self.piper is None:
             self.sapi = SapiTTS(speed)
 
-    def say(self, text: str):
+    interrupts = None   # wakeword.InterruptSpotter: lets "stop" / "Hey Max" cut Max off
+
+    def say(self, text: str) -> str | None:
+        """Speak `text`. Returns "stop" or "wake" if the user interrupted, else None."""
         text = clean_for_speech(text)
         if not text:
-            return
+            return None
+        if self.piper and self.mic and self.interrupts is not None:
+            return self._say_interruptible(text)
         if self.mic:
             self.mic.muted.set()
         try:
@@ -101,3 +106,24 @@ class Speaker:
             if self.mic:
                 self.mic.flush()
                 self.mic.muted.clear()
+        return None
+
+    def _say_interruptible(self, text: str) -> str | None:
+        """Play without blocking and keep the mic open for "stop" / "Hey Max" meanwhile."""
+        import sounddevice as sd
+
+        from .speech import watch_for_interrupt
+
+        audio, sr = self.piper.synthesize(text)
+        self.mic.flush()
+        self.interrupts.reset()
+        sd.play(audio, sr, device=self.device)
+        try:
+            heard = watch_for_interrupt(self.mic.read, self.interrupts, len(audio) / sr + 0.15, text)
+        finally:
+            if heard:
+                sd.stop()
+            else:
+                sd.wait()
+            self.mic.flush()
+        return heard

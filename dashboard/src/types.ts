@@ -60,3 +60,10 @@ export type Pairing = { enabled: boolean; url: string; token: string; link: stri
 
 export type LiveLine = { t: string; text: string };
 export type NotesLive = { active: boolean; final?: LiveLine[]; live?: LiveLine[]; partial?: string; captions?: boolean };
+
+export type PrivacyCategory = { id: string; label: string; what: string; where: string; amount: string };
+
+export type EvalSummary = { at: string; n: number; tool_accuracy: number; full_accuracy: number; p50_s: number; p95_s: number;
+  avg_prompt_tokens: number; model: string; categories: Record<string, { n: number; tool: number; full: number }>; file?: string };
+export type EvalResult = { category: string; say: string; called: string[]; tool_ok: boolean; args_ok: boolean; why: string; seconds: number };
+export type EvalData = { runs: (EvalSummary & { file: string })[]; latest: { summary: EvalSummary; results: EvalResult[] } | null };

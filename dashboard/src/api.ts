@@ -1,4 +1,4 @@
-import type { Fact, MaxState, NoteDetail, NoteItem, NotesStatus, NotesLive, Pairing, Reminder } from "./types";
+import type { Fact, MaxState, NoteDetail, NoteItem, NotesStatus, NotesLive, Pairing, PrivacyCategory, Reminder, EvalData } from "./types";
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -43,5 +43,9 @@ export const api = {
   openNote: (id: number) => call<{ ok: boolean }>(`/api/notes/${id}/open`, { method: "POST" }),
   noteSummary: (id: number, refresh = false) =>
     call<{ summary_md: string }>(`/api/notes/${id}/summary${refresh ? "?refresh=true" : ""}`, { method: "POST" }),
+  evals: () => call<EvalData>("/api/evals"),
+  privacy: () => call<PrivacyCategory[]>("/api/privacy"),
+  privacyDelete: (id: string) =>
+    call<{ ok: boolean; message: string }>(`/api/privacy/delete/${id}`, { method: "POST", body: JSON.stringify({ confirm: id }) }),
   pair: () => call<Pairing>("/api/pair"),
 };

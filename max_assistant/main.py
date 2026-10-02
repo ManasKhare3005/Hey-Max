@@ -13,6 +13,8 @@ from logging.handlers import RotatingFileHandler
 
 from .agent import Agent, parse_yes_no
 from .events import current_origin, set_origin
+from .speech import SentenceSpeaker
+from .toolselect import ToolSelector
 from .config import load_config, resolve_path
 from .llm import OllamaClient
 from .tools import system as system_tools
@@ -21,6 +23,8 @@ from .tools import canvas as canvas_tools
 from .tools import digest as digest_tools
 from .tools import notes as notes_tools
 from .tools import phone as phone_tools
+from .tools import course as course_tools
+from .tools import screen as screen_tools
 from .tools import memory as memory_tools
 from .tools import web as web_tools
 from .tools.registry import ToolRegistry
@@ -38,7 +42,8 @@ def is_question(reply: str) -> bool:
 
 
 def converse(first_text: str, respond, listen_again, follow_up: bool = True,
-             on_heard=lambda t: None, on_idle=lambda: None) -> int:
+             on_heard=lambda t: None, on_idle=lambda: None,
+             interrupted=lambda: None, listen_new=None) -> int:
     """Run one exchange, then keep going while Max's reply is a question.
 
     respond(text) -> reply (after speaking it); listen_again() -> transcript or ''.
@@ -55,6 +60,12 @@ def converse(first_text: str, respond, listen_again, follow_up: bool = True,
         on_heard(text)
         reply = respond(text)
         handled += 1
+        cut = interrupted()                # the user said "stop" or "Hey Max" while Max was talking
+        if cut == "stop":
+            return handled
+        if cut == "wake" and listen_new is not None:
+            text = listen_new()            # a fresh request, no wake word needed
+            continue
         if not (follow_up and reply and is_question(reply)):
             return handled
         text = listen_again()
@@ -80,6 +91,7 @@ class Context:
         self.confirm = lambda prompt: False   # spoken yes/no, set by build()
         self.bus = None        # events.EventBus, set by build()
         self.phone = None      # phone.PhoneBridge: actions on the user's phone
+        self.course = None     # course.CourseLibrary: slides, PDFs and lecture notes to answer from
 
 
 def setup_logging(cfg, verbose: bool):
@@ -148,6 +160,15 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
                                  include_mic_in_meetings=notes_cfg.get("include_mic_in_meetings", True),
                                  live_model_dir=resolve_path(notes_cfg["live_model"])
                                  if notes_cfg.get("live_captions", True) and notes_cfg.get("live_model") else None)
+    course_cfg = cfg.get("course", {}) or {}
+    if course_cfg.get("enabled", True) and ctx.memory is not None:
+        from .course import CourseLibrary
+
+        folders = [Path(os.path.expanduser(f)) for f in course_cfg.get("folders", ["~/Documents/Max Course Material"])]
+        if course_cfg.get("include_lecture_notes", True):
+            folders.append(Path(os.path.expanduser(notes_cfg.get("folder", "~/Documents/Max Notes"))))
+        folders[0].mkdir(parents=True, exist_ok=True)          # so there's an obvious place to drop files
+        ctx.course = CourseLibrary(folders, ctx.memory.embedder, course_cfg.get("index", "data/course.db"))
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
     web_tools.register(registry)
@@ -157,6 +178,8 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
     digest_tools.register(registry)
     notes_tools.register(registry)
     phone_tools.register(registry)
+    course_tools.register(registry)
+    screen_tools.register(registry)
     agent = Agent(
         llm, registry,
         fast_model=cfg.llm.fast_model,
@@ -169,6 +192,7 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
         on_event=on_event,
         recall=ctx.memory.context_for if ctx.memory else None,
         on_turn=ctx.memory.log_turn if ctx.memory else None,
+        tool_selector=ToolSelector(registry, ctx.memory.embedder if ctx.memory else None),
     )
     return ctx, llm, agent
 
@@ -226,6 +250,22 @@ def start_digest(ctx, bus=None):
 
     return DigestScheduler(ctx, d.get("time", "07:00"), d.get("weekends", True),
                            d.get("catch_up_until", "18:00"), on_sent).start()
+
+
+def start_course(ctx):
+    """Index course files in the background now and every 10 minutes."""
+    if getattr(ctx, "course", None) is not None:
+        ctx.course.start((ctx.cfg.get("course", {}) or {}).get("rescan_minutes", 10) * 60)
+
+
+def start_alerts(ctx, bus):
+    """Phone notifications 24 h / 3 h before Canvas deadlines and 10 min before classes."""
+    al = ctx.cfg.get("alerts", {}) or {}
+    if not al.get("enabled", True) or ctx.memory is None or bus is None or getattr(ctx, "canvas", None) is None:
+        return None
+    from .alerts import DeadlineAlerts
+
+    return DeadlineAlerts(ctx, bus.publish, al.get("hours_before_due", [24, 3]), al.get("minutes_before_class", 10)).start()
 
 
 def start_reminders(ctx, announce):
@@ -308,6 +348,8 @@ def run_text(cfg, verbose: bool):
 
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, "(text mode)", "text"))
     start_digest(ctx, bus)
+    start_alerts(ctx, bus)
+    start_course(ctx)
     bus.publish("stage", {"stage": "text mode"})
     start_reminders(ctx, lambda text: (bus.publish("reminder", {"action": "fired", "text": text}),
                                        print(f"\n⏰ {text}\nyou > ", end="")))
@@ -332,6 +374,73 @@ def make_wake_detector(cfg):
     from .wakeword import make_detector
 
     return make_detector(cfg.wake_word)
+
+
+def make_voice_id(cfg):
+    """Voice ID when it's enabled and you've enrolled (run.bat --enroll-voice)."""
+    v = cfg.get("voice_id", {}) or {}
+    if not v.get("enabled", True):
+        return None
+    try:
+        from .voiceid import VoiceID
+
+        vid = VoiceID(v.get("model", "models/voiceid/eres2net_en_voxceleb.onnx"), v.get("profile", "data/voice_profile.npy"),
+                      v.get("threshold", 0.42))
+    except Exception as exc:
+        log.warning("voice ID unavailable (%s)", exc)
+        return None
+    if not vid.enrolled:
+        log.info("voice ID: not enrolled yet (run.bat --enroll-voice)")
+        return None
+    log.info("voice ID on: risky requests in other voices need a tap on your phone")
+    return vid
+
+
+ENROLL_LINES = ["Hey Max, what's due this week?", "Remind me to call my mom tomorrow at six.",
+                "Open Spotify and play something relaxing.", "Take notes for this lecture, please.",
+                "What's the weather going to be like in Tempe today?", "Set a timer for ten minutes on my phone."]
+
+
+def _as_float(audio):
+    import numpy as np
+
+    return audio.astype(np.float32) / 32768.0 if audio.dtype != np.float32 else audio
+
+
+def run_enroll_voice(cfg):
+    """Record a few sentences and save the user's voiceprint (no audio is kept)."""
+    from .audio import Microphone, NoiseFloor, record_utterance
+    from .voiceid import VoiceID
+
+    v = cfg.get("voice_id", {}) or {}
+    vid = VoiceID(v.get("model", "models/voiceid/eres2net_en_voxceleb.onnx"), v.get("profile", "data/voice_profile.npy"),
+                  v.get("threshold", 0.42))
+    a = cfg.audio
+    mic = Microphone(a.sample_rate, a.input_device)
+    noise = NoiseFloor()
+    mic.start()
+    print("Voice ID enrolment. Read each sentence out loud in your normal voice, at your usual distance.\n")
+    for _ in range(12):                                  # learn the room's background noise first
+        frame = mic.read(timeout=0.5)
+        if frame is not None:
+            noise.update(frame)
+    clips = []
+    for i, line in enumerate(ENROLL_LINES, 1):
+        print(f"  {i}/{len(ENROLL_LINES)}  \"{line}\"")
+        audio = record_utterance(mic, noise, a.vad_sensitivity, 1.0, 6.0, 12.0)
+        if audio is None or len(audio) < 16000:
+            print("     (didn't catch that; skipping)")
+            continue
+        clips.append(_as_float(audio))
+    vid.enroll(clips)
+    print("\nNow say anything else, to check it recognises you:")
+    test = record_utterance(mic, noise, a.vad_sensitivity, 1.0, 6.0, 12.0)
+    mic.stop()
+    if test is not None:
+        s = vid.score(_as_float(test))
+        if s is not None:
+            print(f"     similarity {s:.2f} (threshold {vid.threshold}): {'recognised' if s >= vid.threshold else 'NOT recognised'}")
+    print(f"\nSaved your voiceprint to {vid.profile_path}. Restart Max to use it.")
 
 
 def run_wake_test(cfg):
@@ -382,6 +491,20 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
                        cfg.stt.get("fast_model_dir"), cfg.stt.get("fast_min_snr_db", 12.0),
                        cfg.stt.get("prompt"))
     speaker = Speaker(cfg.tts.engine, cfg.tts.piper_voice, cfg.tts.speed, a.output_device, mic=mic)
+    heard_audio = {"last": None}              # the last recording, for voice ID
+    voice_check = {"owner": None}             # did the current request sound like the user? (None = unknown)
+    voice_id = make_voice_id(cfg)
+    if a.get("barge_in", True) and speaker.piper is not None:
+        try:
+            from .wakeword import InterruptSpotter
+
+            # "stop" alone is short and common, so it needs a clearer match than two-word phrases
+            speaker.interrupts = InterruptSpotter({"Hey Max": 0.2, "Max stop": 0.2, "Stop it": 0.25,
+                                                   "Okay stop": 0.25, "Stop": 0.35},
+                                                  (cfg.wake_word.get("sherpa") or {}).get("model_dir", "models/kws/gigaspeech-3.3M"))
+            log.info("interrupting enabled: say 'stop' or 'Hey Max' while Max is talking")
+        except Exception as exc:
+            log.warning("interrupting unavailable (%s)", exc)
     wake = make_wake_detector(cfg)
     noise = NoiseFloor()
 
@@ -413,14 +536,32 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         if a.chime:
             threading.Thread(target=ring, daemon=True).start()
         beat.set("listening to command")
-        text = listen_for_command(mic, noise, stt.transcribe, a.vad_sensitivity, a.silence_s, timeout,
+
+        def transcribe(audio):                 # keep the recording: voice ID checks who said it
+            heard_audio["last"] = audio
+            return stt.transcribe(audio)
+
+        heard_audio["last"] = None
+        text = listen_for_command(mic, noise, transcribe, a.vad_sensitivity, a.silence_s, timeout,
                                   a.max_record_s, a.get("early_s", 0.4), a.get("max_silence_s", 1.8),
                                   should_stop=should_stop)
         if text:
             bus.publish("heard", {"text": text, "source": "voice"})
         return text
 
+    def phone_only(prompt: str) -> bool:
+        """A voice that isn't the user's asked for something risky: only a tap on the phone counts."""
+        phone = getattr(ctx, "phone", None)
+        if phone is None or not phone.online:
+            say("I didn't recognise your voice, and your phone isn't connected, so I won't do that.")
+            return False
+        say("I didn't recognise your voice. Approve it on your phone if it was you.")
+        return approvals.wait(prompt + " (Max didn't recognise the voice.)",
+                              (cfg.get("phone", {}) or {}).get("approval_timeout_s", 90))
+
     def confirm(prompt: str) -> bool:
+        if voice_check["owner"] is False:          # the request itself came from an unknown voice
+            return phone_only(prompt)
         # Voice and dashboard race: a click stops the listening early
         request = approvals.open(prompt)
         say(prompt + " Say yes or no.")
@@ -430,18 +571,27 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         else:
             approved, by = parse_yes_no(answer), "voice"
             print(f"   you: {answer or '(silence)'}")
+            if approved and voice_id is not None and heard_audio["last"] is not None \
+                    and voice_id.is_owner(heard_audio["last"]) is False:
+                approvals.close(request, False, "voice not recognised")
+                return phone_only(prompt)           # someone else said "yes"
         approvals.close(request, approved, by)
         return approved
 
     speak_lock = threading.Lock()
 
+    cut = {"kind": None}          # "stop" / "wake" when the user interrupted Max's last reply
+
     def say(text: str):
         with speak_lock:          # one voice at a time: a filler never overlaps the answer
-            speaker.say(text)
+            result = speaker.say(text)
+        if result:
+            cut["kind"] = result
+        return result
 
     def say_main(text: str):      # the main loop's own speech, tracked by the heartbeat
         beat.set("speaking")
-        say(text)
+        return say(text)
 
     printer = event_printer(verbose)
     turn = {"filler": False}
@@ -472,6 +622,7 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
 
     def run_command(text: str, source: str = "dashboard") -> str:
         with agent_lock:
+            voice_check["owner"] = None           # typed or from the phone: no voice to check
             bus.publish("heard", {"text": text, "source": source})
             set_origin(source)
             try:
@@ -488,11 +639,20 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
             say_main("Okay.")
             return None
         ctx.models_asleep = False
+        cut["kind"] = None
+        last = heard_audio["last"]
+        voice_check["owner"] = voice_id.is_owner(last) if voice_id is not None and last is not None else None
         beat.set("thinking")
+        # Speak each sentence as soon as the model has written it, instead of after the whole reply
+        stream = SentenceSpeaker(say) if a.get("stream_replies", True) else None
         with agent_lock:
-            answer = agent.handle(text)
+            answer = agent.handle(text, on_text=stream.feed if stream else None)
         print(f"🤖 {cfg.assistant.name.lower()}: {answer}\n")
-        say_main(answer)
+        beat.set("speaking")
+        if stream is not None:
+            cut["kind"] = stream.finish(answer) or cut["kind"]
+        else:
+            say_main(answer)
         return answer
 
     def listen_follow_up() -> str:
@@ -523,6 +683,8 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     controls = Controls()
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"), controls)
     digest = start_digest(ctx, bus)
+    alerts = start_alerts(ctx, bus)  # noqa: F841
+    start_course(ctx)
     mic.start()
     beat.start()
     print(f"\n✅ Ready. Say \"{wake.phrase}\". Press Ctrl+C to quit.\n")
@@ -562,7 +724,8 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
                 if not announcements.empty():
                     text = announcements.get()
                     print(f"⏰ {text}")
-                    say_main(text)
+                    if say_main(text) == "wake":            # "Hey Max" during an announcement
+                        controls.listen_now.set()
                     wake.reset()
                     beat.set("waiting for wake word")
                 frame = mic.read(timeout=0.3)
@@ -578,7 +741,8 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
             print("👂 Listening...")
             converse(listen(a.no_speech_timeout_s), respond, listen_follow_up,
                      follow_up=a.get("follow_up", True),
-                     on_heard=lambda t: print(f"🗣  you: {t}"), on_idle=idle)
+                     on_heard=lambda t: print(f"🗣  you: {t}"), on_idle=idle,
+                     interrupted=lambda: cut["kind"], listen_new=lambda: listen(a.no_speech_timeout_s))
             wake.reset()
             mic.flush()
             beat.set("waiting for wake word")
@@ -604,6 +768,7 @@ def main(argv=None):
     parser.add_argument("--wake-test", action="store_true", help="Show live wake word scores to tune the threshold")
     parser.add_argument("--tray", action="store_true",
                         help="Background mode: no console needed, tray icon (used by install_autostart.ps1)")
+    parser.add_argument("--enroll-voice", action="store_true", help="Record your voice for voice ID (a few sentences)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -620,7 +785,7 @@ def main(argv=None):
 
         unblock_console()
     setup_logging(cfg, args.verbose)
-    if not (args.text or args.wake_test):
+    if not (args.text or args.wake_test or args.enroll_voice):
         from .winutil import single_instance
 
         instance = single_instance()               # noqa: F841 (held for the process lifetime)
@@ -631,7 +796,9 @@ def main(argv=None):
 
             webbrowser.open(f"http://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}")
             return
-    if args.wake_test:
+    if args.enroll_voice:
+        run_enroll_voice(cfg)
+    elif args.wake_test:
         run_wake_test(cfg)
     elif args.text:
         run_text(cfg, args.verbose)

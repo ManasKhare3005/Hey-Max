@@ -345,3 +345,28 @@ code { font-family: var(--mono); font-size: 0.92em; color: var(--cyan); }
   background: var(--cyan); animation: caret 1s steps(2) infinite; }
 .live-wait { color: var(--text-2); font-size: 12.5px; }
 @keyframes caret { 50% { opacity: 0; } }
+
+/* privacy */
+.privacy-export { display: inline-block; margin: 12px 0; text-decoration: none; }
+.privacy-msg { margin-bottom: 10px; color: var(--cyan); font-size: 13px; }
+.privacy-row { align-items: center; gap: 14px; }
+.privacy-text { min-width: 0; flex: 1; }
+.privacy-where { word-break: break-all; margin-top: 2px; }
+
+/* accuracy */
+.acc-head { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 6px 0 8px; }
+.acc-big { font-family: var(--mono, monospace); font-size: 28px; color: var(--cyan); }
+.acc-chart { width: 100%; height: 90px; color: var(--cyan); margin: 4px 0 10px; }
+.acc-row { display: grid; grid-template-columns: 140px 1fr 50px; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
+.acc-cat { text-transform: capitalize; }
+.acc-bar { height: 8px; border-radius: 4px; background: rgba(255,255,255,.07); overflow: hidden; }
+.acc-bar span { display: block; height: 100%; background: var(--cyan); }
+.acc-misses { margin: 14px 0 6px; }
+.acc-miss { font-size: 13px; margin-bottom: 6px; }
+
+/* seven drawer tabs: scroll sideways instead of clipping */
+.drawer .tabs { overflow-x: auto; scrollbar-width: none; }
+.drawer .tabs::-webkit-scrollbar { display: none; }
+.drawer .tabs button { flex: 0 0 auto; padding-left: 10px; padding-right: 10px; }
+.acc-chart { height: 70px; }
+.acc-list { display: flex; flex-direction: column; }

@@ -94,6 +94,31 @@ class MemoryStore:
         self._facts = self._load_vectors("facts", "text")
         self._turns = self._load_vectors("turns", "user || ' → ' || reply")
 
+    # ----- privacy page: count, export, wipe -----
+    TABLES = ("facts", "turns", "actions", "reminders", "notes", "kv")
+
+    def count(self, table: str) -> int:
+        assert table in self.TABLES
+        with self.lock:
+            return self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def dump(self, table: str) -> list[dict]:
+        """Every row (without the embedding vectors), for export."""
+        assert table in self.TABLES
+        with self.lock:
+            return [{k: r[k] for k in r.keys() if k != "vec"} for r in self.db.execute(f"SELECT * FROM {table} ORDER BY 1")]
+
+    def clear(self, table: str):
+        assert table in self.TABLES
+        with self.lock:
+            self.db.execute(f"DELETE FROM {table}")
+            self.db.commit()
+            if table == "facts":
+                self._facts = {"ids": [], "vecs": []}
+            elif table == "turns":
+                self._turns = {"ids": [], "vecs": []}
+            self.db.execute("VACUUM")          # actually remove the deleted text from the file
+
     # ----- vectors -----
     def _load_vectors(self, table: str, text_expr: str) -> dict:
         rows = self.db.execute(f"SELECT id, {text_expr} AS t, vec FROM {table}").fetchall()

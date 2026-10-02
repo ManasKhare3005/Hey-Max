@@ -80,8 +80,11 @@ class ToolRegistry:
 
         return wrap
 
-    def schemas(self) -> list[dict]:
-        return [t.schema() for t in self.tools.values()]
+    def schemas(self, names: list[str] | None = None) -> list[dict]:
+        """All tool definitions, or just `names` (see toolselect.py: all of them no longer fit)."""
+        if names is None:
+            return [t.schema() for t in self.tools.values()]
+        return [self.tools[n].schema() for n in names if n in self.tools]
 
     def get(self, name: str) -> Tool | None:
         return self.tools.get(name)

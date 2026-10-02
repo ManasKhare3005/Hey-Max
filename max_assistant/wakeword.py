@@ -177,6 +177,59 @@ class SherpaKeywordDetector(WakeDetector):
         self._fed = 0
 
 
+class InterruptSpotter:
+    """Several short phrases at once ("stop", "Max stop", "Hey Max"), used only while Max is
+    talking. Same sherpa model as the wake word; returns which phrase was heard."""
+
+    def __init__(self, phrases: dict[str, float], model_dir: str = "models/kws/gigaspeech-3.3M",
+                 boost: float = 1.0, max_gain: float = 4.0, streams: int = 3):
+        import sentencepiece as spm
+        import sherpa_onnx
+
+        d = resolve_path(model_dir)
+        files = lambda prefix: str(sorted(d.glob(f"{prefix}*.onnx"), key=lambda f: ".int8." not in f.name)[0])
+        tokens = d / "tokens.txt"
+        valid = {line.split()[0] for line in tokens.read_text(encoding="utf-8").splitlines() if line.strip()}
+        sp = spm.SentencePieceProcessor(model_file=str(d / "bpe.model"))
+        lines = [keyword_line(p, lambda t: sp.encode(t, out_type=str), valid, boost, th) for p, th in phrases.items()]
+        kw_file = resolve_path("data/interrupt_keywords.txt")
+        kw_file.parent.mkdir(parents=True, exist_ok=True)
+        kw_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.spotter = sherpa_onnx.KeywordSpotter(
+            tokens=str(tokens), encoder=files("encoder"), decoder=files("decoder"), joiner=files("joiner"),
+            keywords_file=str(kw_file), num_threads=1, keywords_threshold=min(phrases.values()), keywords_score=boost,
+        )
+        self.agc = AutoGain(max_gain) if max_gain and max_gain > 1 else None
+        # Staggered streams, as for the wake word: a short "stop" is missed when it straddles
+        # a decoding chunk badly
+        self.num_streams = max(1, streams)
+        self._stagger = int(16000 * SherpaKeywordDetector.CHUNK_S / self.num_streams)
+        self.reset()
+
+    def reset(self):
+        self.streams = [None] * self.num_streams
+        self._fed = 0
+
+    def __call__(self, frame: np.ndarray) -> str | None:
+        x = (self.agc(frame) if self.agc else frame.astype(np.float32)) / 32768.0
+        pos = self._fed
+        self._fed += len(frame)
+        found = None
+        for k, s in enumerate(self.streams):
+            if s is None:
+                if pos < k * self._stagger:
+                    continue
+                s = self.streams[k] = self.spotter.create_stream()
+            s.accept_waveform(16000, x)
+            while self.spotter.is_ready(s):
+                self.spotter.decode_stream(s)
+                kw = self.spotter.get_result(s)
+                if kw:
+                    self.spotter.reset_stream(s)
+                    found = found or kw
+        return found
+
+
 # ---------------- openWakeWord ----------------
 
 @dataclass

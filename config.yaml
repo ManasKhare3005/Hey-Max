@@ -111,6 +111,30 @@ dashboard:
   # Speak replies to commands typed in the dashboard (off: typing usually means "be quiet")
   speak_typed_replies: false
 
+voice_id:
+  # Risky requests (send, delete, power...) in a voice that isn't yours need an Approve tap on
+  # your phone instead of a spoken "yes". Enrol once: run.bat --enroll-voice
+  enabled: true
+  model: models/voiceid/eres2net_en_voxceleb.onnx
+  profile: data/voice_profile.npy      # your voiceprint (numbers, not audio)
+  threshold: 0.42                      # measured: you 0.63+, other voices 0.21 or less; raise to be stricter
+
+course:
+  # "Ask your course material": put slides, PDFs, Word and text files here (one subfolder per
+  # course works best). Indexed on this laptop; the files are never changed or moved.
+  enabled: true
+  folders:
+    - ~/Documents/Max Course Material
+  include_lecture_notes: true   # also search your saved meeting/lecture notes
+  rescan_minutes: 10
+  index: data/course.db
+
+alerts:
+  # Phone notifications before Canvas deadlines and classes (needs the phone app paired)
+  enabled: true
+  hours_before_due: [24, 3]
+  minutes_before_class: 10
+
 phone:
   # Android app (Phase 4). The phone connects through Tailscale ("tailscale serve"), so the
   # API itself stays on 127.0.0.1. Pair it by scanning the QR code in the dashboard.
@@ -138,6 +162,10 @@ audio:
   follow_up: true
   # ...for this long before going back to waiting for "Hey Max"
   follow_up_timeout_s: 5.0
+  # Start speaking the first sentence while the rest of the answer is still being written
+  stream_replies: true
+  # Say "stop" (or "Max stop") to cut Max off, or "Hey Max" to cut it off and ask something new
+  barge_in: true
   # Multiplier over measured background noise to count as speech
   vad_sensitivity: 3.0
   chime: true

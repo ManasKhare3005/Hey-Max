@@ -68,6 +68,8 @@ Make sure the **Ollama app is running** (it starts with Windows after install).
 
 Tools are marked safe or risky in code. Risky ones (`close_app`, `power`) always ask **"…Say yes or no."** Only a clear yes runs them; silence or anything ambiguous counts as no. Shutdown/restart also wait 10 seconds and can be cancelled ("cancel shutdown").
 
+**Voice ID:** run `run.bat --enroll-voice` once (six sentences; only a voiceprint is saved, never audio). After that, a risky request or a "yes" in a voice that isn't yours isn't accepted by voice: Max asks for an **Approve tap on your phone** instead (or refuses if the phone isn't connected). Tune `voice_id.threshold` in `config.yaml`.
+
 In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete and similar ask first, and so does pressing Enter anywhere except a search box. Max never types into password fields.
 
 ## Tuning (`config.yaml`)
@@ -92,6 +94,16 @@ In the browser, clicks on buttons that buy, pay, send, post, subscribe, delete a
 - **Canvas (ASU):** put your Canvas calendar feed link (Canvas → Calendar → Calendar Feed) in `secrets.yaml` (never committed). Then ask "What's due today?", "What do I have this week?", "When's my next class?". Read-only; assignments, quizzes and class sessions (with Zoom links). Cross-listed duplicate sessions are filtered out.
 - **Day summary:** "What does my day look like?"
 - **Daily digest email** every morning (`digest` in `config.yaml`, default 7:00): what's due today and in the next 3 days, today's classes and reminders, with a short focus note from the local model. Sent through Gmail with an [app password](https://myaccount.google.com/apppasswords) in `secrets.yaml`. If the laptop was off, it's sent when Max starts (until 6 PM); never twice a day. "Email me my summary" sends it on demand.
+
+- **Deadline countdown:** phone notifications 24 hours and 3 hours before anything is due, and 10 minutes before each class (tap to join the Zoom link). Each alert is sent once; ones missed while the phone was offline arrive when it reconnects (`alerts` in `config.yaml`).
+
+## Ask your course material
+
+Put slides (`.pptx`), PDFs, Word and text files in `Documents\Max Course Material` (one subfolder per course works best). Max indexes them on this laptop, page by page and slide by slide, and keeps the index up to date every 10 minutes; your saved lecture notes are included. Ask "what did the professor say about RDF schema?", "explain SPARQL OPTIONAL from the lab handout" or "what's on the midterm review sheet?" and Max answers from the matching passages and says which file and page it came from. The files are never changed or moved.
+
+## Read my screen
+
+"What does this error mean?", "summarise what's on my screen": Max captures the window in front (into memory only, never saved), reads its text with Windows' built-in OCR and answers with the local model. Only when you ask.
 
 ## Always on
 
@@ -122,6 +134,12 @@ A small always-on-top pill you can drag anywhere on screen (`overlay.bat`, or in
 
 It's a separate lightweight process (pywebview on Windows' built-in Edge WebView) talking to Max's local API, so it keeps working while Max is stopped.
 
+## Talking with Max
+
+- **Faster answers:** Max starts speaking the first sentence while the rest is still being written (about 0.5-1 s sooner). Turn off with `audio.stream_replies`.
+- **Interrupt it:** while Max is talking, say "stop" or "Max, stop" to cut it off, or "Hey Max…" to cut it off and ask something new. Works on laptop speakers: a keyword in what Max itself is saying is ignored (`audio.barge_in`).
+- **Only the tools a request needs:** with ~50 tools the definitions alone outgrew the model's 4,096-token window, so each request now gets a small core plus the tool families that match it (by meaning and keywords) and any used in the last two turns (`toolselect.py`).
+
 ## Dashboard
 
 While Max runs, open **http://127.0.0.1:8765** (this laptop only). A mission-control view of the assistant:
@@ -131,6 +149,8 @@ While Max runs, open **http://127.0.0.1:8765** (this laptop only). A mission-con
 - **approvals**: risky actions show Approve / Deny, racing the spoken yes/no
 - **live activity**: tool calls, results, reminders, approvals as they happen
 - **memory & reminders** drawer: search facts by meaning, add or forget them, set and cancel reminders
+- **accuracy**: results of the command accuracy test (below), per category and over time
+- **privacy**: everything Max keeps on this laptop, where it lives and how much; export it all as one zip or delete any category (laptop only, two clicks)
 
 The same REST + WebSocket API (`/api/docs`) is what the phone app uses (and the watch will). Built with React + Vite + TypeScript (`dashboard/`); `setup.ps1` builds it if Node.js is installed. For UI work: `cd dashboard && npm run dev` (proxies to a running Max).
 
@@ -173,6 +193,10 @@ It uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) open-vocabulary key
 - **Choose a good phrase:** two or more words, distinct sounds. "Hey Max" also fires on "Hey Mac" (they sound almost the same), and a single word like "Max" alone would fire constantly.
 - **openWakeWord instead:** set `engine: openwakeword` to use its pre-trained models (`hey_jarvis`, `alexa`, `hey_mycroft`) or a custom-trained `.onnx`. If the sherpa model fails to load, Max falls back to this with "Hey Jarvis" and logs a warning.
 
+## Command accuracy test
+
+`.\.venv\Scripts\python -m max_assistant.evals` sends about 90 realistic commands (`evals/commands.yaml`) to the real model with every tool stubbed, so nothing happens on the laptop or phone, and scores whether Max picked the right action and the right details, plus speed. Results go to `data/evals/` and the dashboard's Accuracy tab. Latest: **99% right action, 99% with the right details, median 1.4 s**, up from 90% / 84% on the first run (the misses led to fixes in `agent.py`).
+
 ## Troubleshooting
 
 - **"Can't reach Ollama"** — open the Ollama app, or run `ollama serve`.
@@ -200,6 +224,14 @@ max_assistant/
   events.py      event bus + approval broker (voice or dashboard)
   server.py      FastAPI: REST + WebSocket, serves the dashboard
   remote.py      phone access: token, pairing QR, audio in/out
+  phone.py       Max acting on the phone (request/answer link)
+  course.py      course material index and search
+  speech.py      speaking while thinking; interrupting
+  toolselect.py  only the tools a request needs
+  voiceid.py     voice ID (speaker embeddings)
+  alerts.py      deadline countdown
+  privacy.py     privacy page: list, export, delete
+  evals.py       command accuracy test (evals/commands.yaml)
   live.py        live captions while taking notes (streaming model)
   browser.py     Max's Chrome window (Playwright), element finding
   tools/

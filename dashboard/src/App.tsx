@@ -43,6 +43,14 @@ export default function App() {
           <span className="label">notes</span>
           <span className="bar-value">{max.recording ? `● recording ${max.recording}` : "meetings & lectures ›"}</span>
         </button>
+        <button className="bar-btn" onClick={() => setDrawer("accuracy")}>
+          <span className="label">accuracy</span>
+          <span className="bar-value">test results ›</span>
+        </button>
+        <button className="bar-btn" onClick={() => setDrawer("privacy")}>
+          <span className="label">privacy</span>
+          <span className="bar-value">your data ›</span>
+        </button>
         <button className="bar-btn" onClick={() => setDrawer("phone")}>
           <span className="label">phone</span>
           <span className="bar-value">pair ›</span>
