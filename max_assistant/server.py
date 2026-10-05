@@ -58,6 +58,12 @@ class NotesStart(BaseModel):
     title: str = ""
 
 
+class DocsSummarize(BaseModel):
+    paths: list[str] = []          # exact files; empty = every course file (or those matching course)
+    course: str = ""
+    redo: bool = False
+
+
 class Speak(BaseModel):
     text: str
 
@@ -186,17 +192,16 @@ def create_app(rt: Runtime) -> FastAPI:
     @app.post("/api/speak")
     def speak(body: Speak):
         """Max's voice for the phone: text -> WAV (Piper, same voice as the laptop)."""
-        from .tts import PiperTTS, clean_for_speech
+        from .tts import clean_for_speech, make_voice
 
         text = clean_for_speech(body.text)[:1500]
         if not text:
             raise HTTPException(400, "nothing to say")
         with speech["lock"]:
             if speech["tts"] is None:
-                try:
-                    speech["tts"] = PiperTTS(cfg.tts.piper_voice, cfg.tts.get("speed", 1.0))
-                except Exception as exc:
-                    raise HTTPException(503, f"Piper voice unavailable: {exc}")
+                speech["tts"] = make_voice(cfg.tts)              # same voice as the laptop (Ava or Piper)
+                if speech["tts"] is None:
+                    raise HTTPException(503, "no voice available")
             audio, sr = speech["tts"].synthesize(text)
         return Response(remote.encode_wav(audio, sr), media_type="audio/wav")
 
@@ -400,7 +405,10 @@ def create_app(rt: Runtime) -> FastAPI:
             raise HTTPException(404, "no such notes")
         folder = Path(n["folder"])
         read = lambda name: (folder / name).read_text(encoding="utf-8") if (folder / name).exists() else ""
-        return {**n, "notes_md": read("notes.md"), "transcript_md": read("transcript.md"),
+        from .docnotes import TEXT_FILE
+
+        text = read(TEXT_FILE) if n.get("kind") == "document" else read("transcript.md")
+        return {**n, "notes_md": read("notes.md"), "transcript_md": text,
                 "summary_md": read("summary.md")}
 
     @app.post("/api/notes/{note_id}/summary")
@@ -416,6 +424,66 @@ def create_app(rt: Runtime) -> FastAPI:
         except Exception as exc:
             raise HTTPException(503, f"couldn't write the summary: {exc}")
         return {"summary_md": text}
+
+    # ----- notes from course documents -----
+    def docs_mgr():
+        if getattr(rt.ctx, "docnotes", None) is None:
+            raise HTTPException(503, "course files are disabled")
+        return rt.ctx.docnotes
+
+    @app.get("/api/documents")
+    def docs_list():
+        """Course files, whether each already has notes, and what's being summarized now."""
+        d = docs_mgr()
+        files = [{"path": str(p), "name": p.name, "course": c, "done": d.is_done(p)} for p, c in d.files()]
+        return {"folder": str(d.library.folders[0]), "files": files, "status": d.status()}
+
+    @app.post("/api/documents/summarize")
+    def docs_summarize(body: DocsSummarize):
+        from pathlib import Path
+
+        d = docs_mgr()
+        items = d.match(body.course)
+        if body.paths:
+            want = {str(Path(p)) for p in body.paths}
+            items = [(p, c) for p, c in items if str(p) in want]
+        if not items:
+            raise HTTPException(404, "no matching course files")
+        queued, skipped = d.enqueue(items, redo=body.redo)
+        return {"queued": [p.name for p in queued], "skipped": [p.name for p in skipped]}
+
+    @app.post("/api/documents/upload")
+    async def docs_upload(request: Request, name: str, course: str = "", summarize: bool = True):
+        """Add a document (raw file body; ?name=lecture3.pdf&course=CSE 573) to the course folder,
+        then write its notes in the background."""
+        from pathlib import Path
+
+        from starlette.concurrency import run_in_threadpool
+
+        from .course import TYPES
+        from .notes import safe_name
+
+        d = docs_mgr()
+        name = Path(name).name
+        ext = Path(name).suffix.lower()
+        if ext not in TYPES:
+            raise HTTPException(400, f"Max can read {', '.join(sorted(TYPES))} files")
+        body = await request.body()
+        if not body or len(body) > 50 * 2**20:
+            raise HTTPException(400, "send the file (up to 50 MB)")
+        folder = d.library.folders[0] / safe_name(course) if course.strip() else d.library.folders[0]
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = safe_name(Path(name).stem)
+        target, n = folder / f"{stem}{ext}", 2
+        while target.exists():
+            target, n = folder / f"{stem} ({n}){ext}", n + 1
+        target.write_bytes(body)
+        threading.Thread(target=d.library.scan, name="course-scan-upload", daemon=True).start()
+        queued = []
+        if summarize:
+            course_name = d.library._course_of(target, d.library.folders[0])
+            queued, _ = await run_in_threadpool(d.enqueue, [(target, course_name)])
+        return {"saved": str(target), "name": target.name, "summarizing": bool(queued)}
 
     @app.post("/api/notes/{note_id}/open")
     def notes_open(note_id: int, request: Request):

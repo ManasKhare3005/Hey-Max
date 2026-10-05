@@ -1,6 +1,6 @@
 """System tray icon for background mode (started by install_autostart.ps1 at login).
 
-Menu: open the dashboard, pause/resume listening, put the models to sleep (free the GPU,
+Menu: open the Max window (or the dashboard in a browser), pause/resume listening, put the models to sleep (free the GPU,
 e.g. before gaming), quit. The voice loop reads `paused` and `quit` between audio frames.
 """
 from __future__ import annotations
@@ -47,7 +47,8 @@ class Tray:
             return self
         item = pystray.MenuItem
         menu = pystray.Menu(
-            item("Open dashboard", lambda: webbrowser.open(self.url), default=True),
+            item(f"Open {self.name}", self._open, default=True),
+            item("Open in browser", lambda: webbrowser.open(self.url)),
             item(lambda _: "Resume listening" if self.paused.is_set() else "Pause listening", self._toggle),
             item("Sleep models (free GPU)", lambda: self._safe(self.free_gpu)),
             pystray.Menu.SEPARATOR,
@@ -56,6 +57,17 @@ class Tray:
         self.icon = pystray.Icon("max", _icon_image(), f"{self.name}: listening", menu)
         self.icon.run_detached()
         return self
+
+    def _open(self):
+        """Max's own window (falls back to the browser if pywebview isn't installed)."""
+        try:
+            import webview  # noqa: F401
+
+            from .app import open_app
+
+            open_app()
+        except Exception:
+            webbrowser.open(self.url)
 
     def set_status(self, text: str):
         if self.icon is not None:

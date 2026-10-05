@@ -4,7 +4,7 @@ import type { Approval, MaxEvent, MaxState, Message, OrbMode, ToolUse } from "./
 
 const ACTIVITY_KINDS = new Set([
   "wake", "heard", "tool_call", "tool_result", "escalate", "approval_request", "approval_result",
-  "reminder", "memory", "answer", "notes",
+  "reminder", "memory", "answer", "notes", "docnotes",
 ]);
 
 /** Live connection to the running Max process: WebSocket events + periodic /api/state. */
@@ -60,6 +60,7 @@ export function useMax() {
         break;
       case "reminder":
       case "memory":
+      case "docnotes":
         setRevision((r) => r + 1);
         break;
       case "notes":

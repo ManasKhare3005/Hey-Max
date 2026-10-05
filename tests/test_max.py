@@ -1997,3 +1997,275 @@ def test_voice_id_tells_the_user_from_other_voices(tmp_path):
     assert VoiceID(model, tmp_path / "profile.npy").enrolled                      # saved and reloaded
     vid.forget()
     assert not vid.enrolled and not (tmp_path / "profile.npy").exists()
+
+
+def test_read_screen_drops_the_text_cursor_and_window_furniture():
+    from max_assistant.tools.screen import clean, merge_reads
+
+    # The real report: Notepad said "hey how are you" and Max read "hey how are youl"
+    first = ["File Edit View", "hey how are youl", "Ln 1, Col 16 100% Windows (CRLF) UTF-8"]
+    second = ["File Edit View", "hey how are you", "Ln 1, Col 16 100% Windows (CRLF) UTF-8"]
+    assert clean(merge_reads(first, second)) == ["hey how are you"]
+    assert clean(merge_reads(second, first)) == ["hey how are you"]        # cursor in the other read
+    assert merge_reads(["I love it all"], ["I love it al"]) == ["I love it al"]   # (only one stray char is trimmed)
+    assert clean(["Run the file", "Edit View Help"]) == ["Run the file"]   # real sentences with menu words stay
+
+
+# ---------- natural voice with Piper fallback (tts.py) ----------
+
+def test_natural_voice_trims_padding_and_falls_back_to_piper():
+    import concurrent.futures as cf
+
+    from max_assistant.tts import NaturalVoice, trim_silence
+
+    sr = 24000
+    speech = np.concatenate([np.zeros(sr), 0.3 * np.ones(sr // 2, np.float32), np.zeros(sr)]).astype(np.float32)
+    trimmed = trim_silence(speech, sr)
+    assert abs(len(trimmed) - (sr // 2 + 2 * int(0.06 * sr))) <= 2           # Ava's padding removed
+    assert len(trim_silence(np.zeros(sr, np.float32), sr)) == 0
+
+    class Piper:
+        def synthesize(self, text):
+            return np.ones(10, np.float32), 22050
+
+    v = NaturalVoice.__new__(NaturalVoice)                                  # no real voice or network in tests
+    v.name, v.fallback, v.timeout_s = "Microsoft Ava Online", Piper(), 1.0
+    v._pool = cf.ThreadPoolExecutor(max_workers=1)
+    v._speak = lambda text: (np.full(100, 0.5, np.float32), 24000)
+    assert v.synthesize("hi")[1] == 24000                                   # online voice when it works
+    v._speak = lambda text: (_ for _ in ()).throw(OSError("no internet"))
+    assert v.synthesize("hi")[1] == 22050                                   # Piper when offline
+    v._speak = lambda text: (np.zeros(0, np.float32), 24000)
+    assert v.synthesize("hi")[1] == 22050                                   # Piper on silence
+
+
+# ---------- Gmail (mail.py, tools/mail.py) ----------
+
+RAW_MAIL = (b"From: Prof. Jane Smith <jsmith@asu.edu>\r\nTo: manas@example.com\r\nSubject: Midterm moved\r\n"
+            b"Date: Thu, 01 Oct 2026 09:30:00 -0700\r\nMessage-ID: <abc123@asu.edu>\r\n"
+            b"Content-Type: multipart/alternative; boundary=b1\r\n\r\n"
+            b"--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHi all,\nThe midterm is moved to Monday at 10am.\n\n"
+            b"On Wed, Sep 30, 2026 at 9:00 AM Someone <x@y.com> wrote:\n> old quoted text\n"
+            b"--b1\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hi all,</p><p>The midterm is moved.</p>\r\n--b1--\r\n")
+
+
+class FakeGmail:
+    def __init__(self, mails):
+        self.mails, self.sent, self.archived, self.read, self.queries = mails, [], [], [], []
+
+    def search(self, query="is:unread in:inbox", limit=5, account=None):
+        self.queries.append(query)
+        return self.mails[:limit]
+
+    def get(self, msgid, account=None):
+        return next((m for m in self.mails if m.msgid == msgid), None)
+
+    def send(self, to, subject, body, reply_to=None, account=None):
+        self.sent.append((to, subject, body, reply_to.message_id if reply_to else None))
+
+    def archive(self, msgid, account=None):
+        self.archived.append(msgid)
+
+    def mark_read(self, msgid, account=None):
+        self.read.append(msgid)
+
+    def contacts(self, name, limit=40):
+        return [(m.sender, m.address) for m in self.mails if name.lower() in m.sender.lower()]
+
+
+def test_mail_parsing_prefers_plain_text_and_drops_quotes():
+    from max_assistant.mail import html_to_text, parse
+
+    m = parse(RAW_MAIL, "111", "222", flags="", labels="\\Important \\Inbox")
+    assert (m.sender, m.address, m.subject) == ("Prof. Jane Smith", "jsmith@asu.edu", "Midterm moved")
+    assert "moved to Monday at 10am" in m.body and "old quoted text" not in m.body
+    assert m.unread and m.important and m.message_id == "<abc123@asu.edu>" and m.link.endswith("/de")
+    text = html_to_text("<p>Hi&amp;there</p><script>x()</script><br>Bye")
+    assert "Hi&there" in text and "Bye" in text and "x()" not in text
+
+
+def test_mail_tools_check_read_reply_archive(tmp_path):
+    from max_assistant.mail import parse
+    from max_assistant.tools import mail as mail_tools
+
+    m1 = parse(RAW_MAIL, "111", "222", "", "\Important")
+    m2 = parse(RAW_MAIL.replace(b"Prof. Jane Smith <jsmith@asu.edu>", b"Canvas <notifications@instructure.com>")
+               .replace(b"Midterm moved", b"New grade posted"), "333", "444")
+    reg = make_registry(tmp_path)
+    reg.context.mail = gmail = FakeGmail([m1, m2])
+    mail_tools.register(reg)
+    out = reg.run("mail_check", {})
+    assert "1. From Prof. Jane Smith" in out and "[important]" in out and "2. From Canvas" in out
+    assert "moved to Monday" in reg.run("mail_read", {"which": "the first one"})
+    assert "New grade" in reg.run("mail_read", {"which": "canvas"})
+    reg.run("mail_reply", {"which": "1", "text": "Thanks, noted!"})
+    assert gmail.sent == [("jsmith@asu.edu", "Re: Midterm moved", "Thanks, noted!", "<abc123@asu.edu>")]
+    assert reg.tools["mail_reply"].risky and reg.tools["mail_send"].risky and not reg.tools["mail_archive"].risky
+    assert reg.run("mail_archive", {"which": "second"}) == "Archived the email from Canvas." and gmail.archived == ["333"]
+    assert reg.run("mail_mark_read", {"which": "all"}) == "Marked 2 emails as read."
+    assert reg.run("mail_send", {"to": "jane", "body": "Hi"}) == "Sent your email to jane." and gmail.sent[-1][0] == "jsmith@asu.edu"
+    gmail.mails = []
+    assert reg.run("mail_check", {}) == "No unread email in your inbox."
+
+
+def test_mail_alerts_for_chosen_senders_and_digest_section():
+    from max_assistant.alerts import MailAlerts
+    from max_assistant.digest import gather, spoken
+    from max_assistant.mail import parse
+
+    m1 = parse(RAW_MAIL, "111", "222", "", "\Important")
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.memory = memory_store()
+    ctx.mail = FakeGmail([m1])
+    events = []
+    alerts = MailAlerts(ctx, lambda k, d: events.append(d), ["@asu.edu"])
+    assert alerts.check() == []                                  # first run: existing mail doesn't alert
+    m2 = parse(RAW_MAIL.replace(b"Midterm moved", b"Office hours today"), "555", "666")
+    ctx.mail.mails = [m2, m1]
+    assert [a["title"] for a in alerts.check()] == ["Email from Prof. Jane Smith"] and events[-1]["text"] == "Office hours today"
+    assert alerts.check() == []                                  # once only
+    restarted = MailAlerts(ctx, lambda k, d: None, ["@asu.edu"])
+    ctx.mail.mails = [parse(RAW_MAIL.replace(b"Midterm moved", b"Grades out"), "777", "888"), m2, m1]
+    assert len(restarted.check()) == 1                           # mail that came while Max was off still alerts
+    ctx.mail.mails = [m1]
+    plan = gather(ctx)
+    assert plan.mail and "Important email: Prof. Jane Smith about Midterm moved." in spoken(plan)
+
+
+def test_three_mailboxes_merge_and_reply_from_the_right_one():
+    from max_assistant.mail import MailAccounts, accounts_from_secrets, parse
+
+    assert accounts_from_secrets({"personal": {"address": "you@gmail.com", "app_password": "xxxx xxxx xxxx xxxx"}}) is None
+    accts = accounts_from_secrets({"personal": {"address": "manas@example.com", "app_password": "abcd efgh ijkl mnop"},
+                                   "university": {"address": "you@asu.edu", "app_password": "xxxx xxxx xxxx xxxx"},
+                                   "max": {"address": "max.helper@example.com", "app_password": "qrst uvwx yzab cdef"}})
+    assert accts.names == ["personal", "max"]                     # the untouched placeholder slot is skipped
+    assert accounts_from_secrets({"address": "a@b.com", "app_password": "real pass word here"}).names == ["personal"]
+
+    uni = parse(RAW_MAIL, "1", "2")
+    home = parse(RAW_MAIL.replace(b"Thu, 01 Oct 2026 09:30", b"Thu, 01 Oct 2026 11:30")
+                 .replace(b"Midterm moved", b"Dinner tonight?"), "3", "4")
+    clients = {"personal": FakeGmail([home]), "university": FakeGmail([uni])}
+    multi = MailAccounts(clients)
+    found = multi.search()
+    assert [(m.subject, m.account) for m in found] == [("Dinner tonight?", "personal"), ("Midterm moved", "university")]
+    assert [m.account for m in multi.search(account="school")] == ["university"]
+    multi.send("jsmith@asu.edu", "Re: Midterm moved", "Thanks", reply_to=found[1])
+    assert clients["university"].sent and not clients["personal"].sent      # replies go out from where the mail came
+    multi.send("x@y.com", "Hi", "Hello", account="uni")
+    assert len(clients["university"].sent) == 2
+
+
+# ---------- notes from course documents (docnotes.py) ----------
+
+class FakeSummarizer:
+    """Stands in for the model: records each call and returns recognisable notes."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, system, text, max_tokens):
+        self.calls.append((system, text))
+        if "Combine" in system:
+            return "## Summary\nNotes about " + " ".join(text.split()[:4]) + "\n\n## Key points\n- point"
+        return f"- section notes {len(self.calls)}"
+
+
+def test_document_sections_group_pages_and_split_long_ones():
+    from max_assistant.docnotes import sections
+
+    items = [("p. 1", "a " * 300), ("p. 2", "b " * 300), ("p. 3", "c " * 900)]
+    out = sections(items, words=700)
+    assert [w for w, _ in out] == ["p. 1-3", "p. 3", "p. 3"]
+    assert [len(t.split()) for _, t in out] == [700, 700, 100]
+    assert sections([("slide 1", "one two three")]) == [("slide 1", "one two three")]
+
+
+def test_document_notes_read_the_whole_file_and_quote_deadlines(tmp_path):
+    from max_assistant.docnotes import TEXT_FILE, save, write_notes
+
+    f = tmp_path / "Syllabus.txt"
+    f.write_text("# Intro\n" + "Semantic web basics and RDF triples. " * 150 +
+                 "\n# Grading\nThe final project is due Friday, December 5 at 11:59 PM.\n", encoding="utf-8")
+    fake = FakeSummarizer()
+    r = write_notes(f, fake, course="CSE 573")
+    assert len(fake.calls) >= 3                                    # map per section, then combine
+    assert r.notes_md.startswith("## Summary")
+    assert "[section 2] “The final project is due Friday, December 5 at 11:59 PM.”" in r.notes_md
+    folder = save(r, tmp_path / "Notes", __import__("datetime").datetime(2026, 10, 5, 13, 0))
+    assert folder.name == "2026-10-05 1300 Syllabus"
+    assert "*Document · CSE 573 · Syllabus.txt" in (folder / "notes.md").read_text(encoding="utf-8")
+    assert "Semantic web basics" in (folder / TEXT_FILE).read_text(encoding="utf-8")
+    assert save(r, tmp_path / "Notes", __import__("datetime").datetime(2026, 10, 5, 13, 0)).name.endswith("(2)")
+    (tmp_path / "empty.txt").write_text("   ", encoding="utf-8")
+    with pytest.raises(ValueError):
+        write_notes(tmp_path / "empty.txt", fake)
+
+
+def test_summarize_course_files_tool_writes_notes_in_the_background(tmp_path):
+    from max_assistant.course import CourseLibrary
+    from max_assistant.docnotes import DocNotes
+    from max_assistant.tools import course as course_tools
+
+    make_course_files(tmp_path / "Course")
+    (tmp_path / "Course" / "Week 1.txt").write_text("Introduction to the course and the grading policy for labs.",
+                                                    encoding="utf-8")
+    reg, ctx = memory_registry()
+    notes_dir = tmp_path / "Max Notes"
+    lib = CourseLibrary([tmp_path / "Course", notes_dir], WordEmbedder(), tmp_path / "course.db")
+    events, finished = [], threading.Event()
+    ctx.course = lib
+    ctx.docnotes = DocNotes(ctx, lib, notes_dir, FakeSummarizer(), on_event=lambda k, d: events.append((k, d)),
+                            on_done=lambda done, failed: finished.set())
+    course_tools.register(reg)
+
+    out = reg.run("summarize_course_files", {"file": "pharmacology"})
+    assert out.startswith("No course file matches that. The files I have are:") and "Lab 3 handout" in out
+    out = reg.run("summarize_course_files", {"course": "CSE 573"})
+    assert out.startswith("Writing notes for Lab 3 handout and Lecture 5.")
+    assert finished.wait(10)
+    notes = ctx.memory.notes()
+    assert sorted(n["title"] for n in notes) == ["Lab 3 handout", "Lecture 5"] and {n["kind"] for n in notes} == {"document"}
+    assert [d["action"] for k, d in events if k == "docnotes"][-1] == "done"
+    # Saved notes are never summarized themselves, and finished files aren't redone
+    assert all(notes_dir not in p.parents for p, _ in ctx.docnotes.files())
+    assert reg.run("summarize_course_files", {"course": "CSE 573"}).startswith("I already wrote notes for")
+    finished.clear()
+    out = reg.run("summarize_course_files", {"file": "every file"})
+    assert "Midterm review" in out and "Week 1" in out and "already had notes" in out
+    assert finished.wait(10) and len(ctx.memory.notes()) == 4
+    lib.scan()                                                     # the extracted text isn't indexed twice
+    assert not any(p.endswith("document-text.md") for p, *_ in lib._rows)
+
+
+def test_summarize_everything_in_the_course_folder_goes_straight_to_the_tool():
+    from max_assistant.agent import direct_route
+
+    tools = {"summarize_course_files": None}
+    assert direct_route("can you summarise each and every file you have in the max course folder and make notes "
+                        "of them and put that in the notes section pls", tools) == ("summarize_course_files", {"course": ""})
+    assert direct_route("summarize all the cse573 slides", tools) == ("summarize_course_files", {"course": "CSE 573"})
+    assert direct_route("summarize this web page", tools) is None
+    assert direct_route("what did the professor say about all of it", tools) is None
+
+
+def test_api_adds_a_document_and_writes_its_notes(tmp_path):
+    from max_assistant.course import CourseLibrary
+    from max_assistant.docnotes import DocNotes
+
+    client, rt = api_client()
+    ctx = rt.ctx
+    ctx.course = lib = CourseLibrary([tmp_path / "Course", tmp_path / "Notes"], WordEmbedder(), tmp_path / "course.db")
+    finished = threading.Event()
+    ctx.docnotes = DocNotes(ctx, lib, tmp_path / "Notes", FakeSummarizer(), on_done=lambda d, f: finished.set())
+    assert client.get("/api/documents").json()["files"] == []
+    assert client.post("/api/documents/upload?name=notes.exe", content=b"x").status_code == 400
+    r = client.post("/api/documents/upload?name=Week 2.txt&course=CSE 573",
+                    content=b"Ontologies describe classes and properties. Homework 2 is due October 9 at 5 PM.").json()
+    assert r["name"] == "Week 2.txt" and r["summarizing"] and Path(r["saved"]).parent.name == "CSE 573"
+    assert finished.wait(10)
+    files = client.get("/api/documents").json()["files"]
+    assert [(f["name"], f["course"], f["done"]) for f in files] == [("Week 2.txt", "CSE 573", True)]
+    note = client.get(f"/api/notes/{ctx.memory.notes()[0]['id']}").json()
+    assert note["kind"] == "document" and "Ontologies" in note["transcript_md"] and "Homework 2" in note["notes_md"]
+    assert client.post("/api/documents/summarize", json={"paths": [files[0]["path"]]}).json()["skipped"] == ["Week 2.txt"]

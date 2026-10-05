@@ -33,6 +33,8 @@ CANNED = {
     "recall": "Manas's sister's name is Priya.",
     "web_search": "Web results: [1] Example result with the facts the user asked about.",
     "canvas_due": "Due today: Lab 4 for CSE 572, by end of day.",
+    "mail_check": "2 unread: 1. From Prof. Jane Smith - Midterm moved (2 h ago) 2. From Canvas - New grade posted (5 h ago)",
+    "mail_search": "1. From Prof. Jane Smith - Midterm moved (2 h ago): The midterm is moved to Monday at 10am.",
 }
 
 
@@ -77,6 +79,10 @@ def build_for_eval(cfg):
     cfg["course"] = {**(cfg.get("course") or {}), "folders": [str(tmp / "course")], "include_lecture_notes": False,
                      "index": str(tmp / "course.db")}
     cfg["notes"] = {**(cfg.get("notes") or {}), "folder": str(tmp / "notes"), "file": str(tmp / "quick.md")}
+    secrets = dict(cfg.get("secrets") or {})
+    secrets["gmail"] = {"personal": {"address": "eval@example.com", "app_password": "test test test test"},   # stubbed: no login
+                        "university": {"address": "eval@school.edu", "app_password": "test test test test"}}
+    cfg["secrets"] = secrets
     bus = EventBus()
     confirms: list[str] = []
     # No approval broker: risky tools are approved straight away (from the phone they'd wait for a tap)

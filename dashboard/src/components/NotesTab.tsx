@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { NoteDetail, NoteItem, NotesLive, NotesStatus } from "../types";
+import type { DocsInfo, NoteDetail, NoteItem, NotesLive, NotesStatus } from "../types";
 import Markdown from "./Markdown";
 
 const mmss = (s = 0) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-/** Meeting & lecture notes: record, list past sessions, read notes or transcripts. */
+/** Meeting & lecture notes and notes from course documents: record or add, list, read notes or transcripts. */
 export default function NotesTab({ revision }: { revision: number }) {
   const [status, setStatus] = useState<NotesStatus>({ active: false, finishing: false });
   const [items, setItems] = useState<NoteItem[]>([]);
@@ -63,7 +63,8 @@ export default function NotesTab({ revision }: { revision: number }) {
         <div className="tabs small">
           <button className={view === "notes" ? "active" : ""} onClick={() => setView("notes")}>Notes</button>
           <button className={view === "summary" ? "active" : ""} onClick={() => summarize()}>Summary</button>
-          <button className={view === "transcript" ? "active" : ""} onClick={() => setView("transcript")}>Transcript</button>
+          <button className={view === "transcript" ? "active" : ""} onClick={() => setView("transcript")}>
+            {open.kind === "document" ? "Text" : "Transcript"}</button>
           <button onClick={() => api.openNote(open.id)}>Open folder</button>
         </div>
         {error && <div className="error-line">{error}</div>}
@@ -105,6 +106,7 @@ export default function NotesTab({ revision }: { revision: number }) {
         </div>
       )}
       {error && <div className="error-line">{error}</div>}
+      <Documents revision={revision} />
       <div className="list">
         {items.length === 0 && <div className="approvals-empty">No notes yet.</div>}
         {items.map((n) => (
@@ -152,6 +154,105 @@ function LiveTranscript() {
           <span className="live-partial">{live.partial}</span><span className="live-caret" />
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/** Course documents: add a file (it's saved to the course folder) and have Max write notes for it. */
+function Documents({ revision }: { revision: number }) {
+  const [info, setInfo] = useState<DocsInfo | null>(null);
+  const [showFiles, setShowFiles] = useState(false);
+  const [course, setCourse] = useState("");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+
+  const load = () => api.documents().then(setInfo).catch(() => setInfo(null));
+  useEffect(() => { load(); }, [revision]);
+  useEffect(() => {                           // follow progress while Max is working through files
+    if (!info?.status.active) return;
+    const t = window.setInterval(load, 2500);
+    return () => window.clearInterval(t);
+  }, [info?.status.active]);
+
+  if (!info) return null;
+  const courses = [...new Set(info.files.map((f) => f.course))].sort();
+  const pending = info.files.filter((f) => !f.done);
+  const s = info.status;
+
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label);
+    setError("");
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy("");
+    }
+  };
+  const upload = (files: FileList | null) => {
+    if (!files?.length) return;
+    run("Uploading…", async () => {
+      for (const f of Array.from(files)) await api.uploadDoc(f, course);
+    });
+    if (input.current) input.current.value = "";
+  };
+
+  return (
+    <div className="doc-card">
+      <div className="doc-top">
+        <div>
+          <div className="list-text">Course documents</div>
+          <div className="label dim">{info.files.length} files · {info.files.length - pending.length} with notes</div>
+        </div>
+        <button className="btn ghost-sm" onClick={() => setShowFiles((v) => !v)}>{showFiles ? "Hide files" : "Show files"}</button>
+      </div>
+      <div className="add-row">
+        <select className="field doc-course" value={course} onChange={(e) => setCourse(e.target.value)} aria-label="Course">
+          <option value="">No course folder</option>
+          {courses.filter((c) => c !== info.folder.split(/[\\/]/).pop()).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <button className="btn primary" disabled={!!busy} onClick={() => input.current?.click()}>+ Add document</button>
+        <input ref={input} type="file" multiple hidden accept=".pdf,.pptx,.docx,.txt,.md" onChange={(e) => upload(e.target.files)} />
+      </div>
+      {s.active ? (
+        <div className="doc-progress">
+          <span className="rec-dot amber" /> Writing notes for <b>{s.current || "…"}</b>
+          {s.waiting.length > 0 && <> · {s.waiting.length} waiting</>}
+          {s.done.length > 0 && <> · {s.done.length} done</>}
+        </div>
+      ) : pending.length > 0 ? (
+        <button className="btn" disabled={!!busy} onClick={() => run("Starting…", () => api.summarizeDocs(pending.map((f) => f.path)))}>
+          ✍ Write notes for {pending.length} file{pending.length > 1 ? "s" : ""} without notes
+        </button>
+      ) : null}
+      {busy && <div className="label dim">{busy}</div>}
+      {error && <div className="error-line">{error}</div>}
+      {!s.active && s.failed.length > 0 && <div className="error-line">Couldn't read: {s.failed.join(", ")}</div>}
+      {showFiles && (
+        <div className="doc-files">
+          {info.files.length === 0 && <div className="label dim">Empty. Add a file, or put files in {info.folder}</div>}
+          {info.files.map((f) => (
+            <div key={f.path} className="doc-file">
+              <div>
+                <div className="doc-name">{f.name}</div>
+                <div className="label dim">{f.course}</div>
+              </div>
+              {f.done ? (
+                <button className="btn ghost-sm" title="Write the notes again" disabled={!!busy || s.active}
+                        onClick={() => run("Starting…", () => api.summarizeDocs([f.path], true))}>✓ notes · redo</button>
+              ) : (
+                <button className="btn ghost-sm" disabled={!!busy || s.current === f.name || s.waiting.includes(f.name)}
+                        onClick={() => run("Starting…", () => api.summarizeDocs([f.path]))}>
+                  {s.current === f.name ? "writing…" : s.waiting.includes(f.name) ? "queued" : "Write notes"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

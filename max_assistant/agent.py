@@ -85,10 +85,12 @@ INTENTS = {
     "phone_email": re.compile(r"^\W*(please\s+|can you\s+)*(email|e-mail)\s+(?!me\b)\w+(\s+\S+){2,}", re.I),
     "find_files": re.compile(r"\bopen my (resume|cv|report|essay|thesis|cover letter|transcript)\b|"
                              r"\bfind (my|the) .*\b(file|pdf|doc|document|presentation|spreadsheet)\b", re.I),
+    "mail_check": re.compile(r"\b(check|any new|anything new in|read me) (my |new )?(e-?mails?|mail|inbox|gmail)\b|"
+                             r"\bdid i get any (e-?mails?|mail)\b", re.I),
 }
 # Requests that already contain everything the tool needs: a question back doesn't excuse skipping it
 COMPLETE_INTENTS = {"phone_message", "read_screen", "volume", "media_control", "email_digest", "phone_calendar_add",
-                    "phone_email", "find_files", "cancel_reminder"}
+                    "phone_email", "find_files", "cancel_reminder", "mail_check"}
 # ...but only when they say which: "cancel my reminder" alone may fairly get "which one?"
 COMPLETE_ONLY_IF = {"cancel_reminder": re.compile(r"\breminders? (about|for|to)\s+\w+", re.I)}
 # Details the model drops but the user clearly said: "search YouTube for lofi" -> site=youtube
@@ -125,6 +127,11 @@ NOTES_STOP = re.compile(r"\b(stop|end|finish)\s+(taking\s+)?(the\s+)?(notes|reco
 NOTES_START = re.compile(r"\btake\s+(some\s+)?notes\b|\b(start|begin)\s+(taking\s+|recording\s+)?(the\s+)?notes\b|"
                          r"\brecord\s+(this|the|my)\s+(lecture|class|meeting|call|session|talk)\b|"
                          r"\bnotes\s+(for|on|of|during)\s+(this|the|my)\s+\w*\s*(lecture|class|meeting|call)\b", re.I)
+# "summarise every file in my course folder": the model guessed file names instead of using the tool
+SUMMARIZE_ALL = re.compile(r"\b(summari[sz]e|sum up|(make|write|take)\s+(study\s+)?notes)\b(?=.*\b(each|every|all|everything)\b)"
+                           r"(?=.*\b(course|class|[a-z]{2,4}\s?\d{3})\b)(?=.*\b(files?|pdfs?|slides?|documents?|docs|readings?|"
+                           r"handouts?|folder|material)\b)", re.I)
+COURSE_CODE = re.compile(r"\b([a-z]{2,4})\s?(\d{3})\b", re.I)
 MEETING_WORDS = re.compile(r"\b(meeting|zoom|teams|call|google meet|webex|video|webinar|stream)\b", re.I)
 
 
@@ -138,6 +145,9 @@ def direct_route(user_text: str, tools) -> tuple[str, dict] | None:
         return "stop_notes", {}
     if "start_notes" in tools and NOTES_START.search(text):
         return "start_notes", {"kind": "meeting" if MEETING_WORDS.search(text) else "lecture"}
+    if "summarize_course_files" in tools and SUMMARIZE_ALL.search(text):
+        code = COURSE_CODE.search(text)
+        return "summarize_course_files", {"course": f"{code.group(1).upper()} {code.group(2)}" if code else ""}
     return None
 
 

@@ -95,3 +95,59 @@ class DeadlineAlerts:
                 self.check()
             except Exception as exc:
                 log.warning("deadline alerts failed: %s", exc)
+
+
+class MailAlerts:
+    """Phone notification when unread mail arrives from senders the user chose (config
+    mail.alert_senders: names, addresses or domains like "@asu.edu"). Checks every 2 minutes;
+    mail already there when Max starts doesn't trigger alerts."""
+
+    def __init__(self, ctx, publish, senders: list[str], interval_s: float = 120):
+        self.ctx = ctx
+        self.publish = publish
+        self.senders = [s.lower().strip() for s in senders if s and s.strip()]
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._primed = False
+
+    def matches(self, mail) -> bool:
+        who = f"{mail.sender} {mail.address}".lower()
+        return any(s in who for s in self.senders)
+
+    def check(self) -> list[dict]:
+        mail = getattr(self.ctx, "mail", None)
+        if mail is None or not self.senders:
+            return []
+        stored = self.ctx.memory.get("mail_alerted")
+        if stored is not None:
+            self._primed = True          # not the very first run: anything new since last time alerts
+        seen = set(json.loads(stored or "[]"))
+        out = []
+        for m in mail.search("is:unread in:inbox newer_than:2d", 15):
+            if m.msgid in seen:
+                continue
+            seen.add(m.msgid)
+            if self._primed and self.matches(m):
+                out.append({"kind": "mail", "title": f"Email from {m.sender}", "text": m.subject, "url": m.link})
+        self._primed = True
+        self.ctx.memory.set("mail_alerted", json.dumps(sorted(seen)[-300:]))
+        for alert in out:
+            log.info("mail alert: %s", alert["title"])
+            self.publish("alert", alert)
+        return out
+
+    def start(self):
+        threading.Thread(target=self._run, name="mail-alerts", daemon=True).start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while True:
+            try:
+                self.check()
+            except Exception as exc:
+                log.warning("mail alerts: %s", exc)
+            if self._stop.wait(self.interval_s):
+                return

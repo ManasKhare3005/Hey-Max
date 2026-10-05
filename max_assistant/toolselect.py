@@ -29,11 +29,12 @@ FAMILIES: dict[str, list[str]] = {
     "canvas": ["canvas_due", "canvas_classes", "day_summary", "email_digest"],
     "notes": ["start_notes", "stop_notes", "meeting_notes"],
     "quick_notes": ["take_note", "read_notes"],
-    "course": ["course_search", "course_files"],
+    "course": ["course_search", "course_files", "summarize_course_files"],
     "files": ["find_files", "open_file"],
     "system": ["close_app", "media_control", "volume", "system_status", "screenshot", "lock_screen", "power",
                "cancel_shutdown", "free_gpu"],
     "screen": ["read_screen"],
+    "mail": ["mail_check", "mail_search", "mail_read", "mail_reply", "mail_send", "mail_archive", "mail_mark_read"],
 }
 
 KEYWORDS: dict[str, re.Pattern] = {
@@ -46,13 +47,15 @@ KEYWORDS: dict[str, re.Pattern] = {
     "notes": re.compile(r"\b(take notes|notes (on|for|of)|record (this|the)|lecture notes|meeting notes|stop (taking )?notes|"
                         r"key points|summar\w+ (of )?(the|my|today'?s) (lecture|meeting|class))\b", re.I),
     "quick_notes": re.compile(r"\b(take a note|note that|jot|my notes|read (my |the )?notes)\b", re.I),
-    "course": re.compile(r"\b(professor|lecture|slides?|handout|reading|course (material|files)|textbook|midterm|final|"
+    "course": re.compile(r"\b(professor|lecture|slides?|handout|reading|course (material|files|folder)|textbook|midterm|final|"
+                         r"pdfs?|summari[sz]e (each|every|all|them|these|those)|notes (of|on|for) (each|every|all|them)|"
                          r"study guide|explain .* (from|in) (the )?(lab|class|lecture))\b", re.I),
     "files": re.compile(r"\b(find|open|where is) (the |my |a )?(file|pdf|document|report|docx|pptx|download|resume|cv|essay)", re.I),
     "system": re.compile(r"\b(volume|louder|quieter|mute|pause|next song|skip|shut ?down|restart|lock|sleep|close|"
                          r"screenshot|cpu|memory usage|free (the )?gpu|go to sleep)\b", re.I),
     "browser": re.compile(r"\b(click|tab|scroll|type|fill|page|video|play (the|it|that)|first (one|result)|second|third|"
                           r"go back|read (the|this) page)\b", re.I),
+    "mail": re.compile(r"\b(e-?mails?|mail|inbox|gmail|unread|reply|replied|archive|mark (it|them|that) (as )?read)\b", re.I),
     "screen": re.compile(r"\b(on my screen|this (error|window|page|screen)|what am i looking at|read (my|the) screen)\b", re.I),
 }
 

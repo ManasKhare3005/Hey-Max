@@ -111,6 +111,13 @@ dashboard:
   # Speak replies to commands typed in the dashboard (off: typing usually means "be quiet")
   speak_typed_replies: false
 
+mail:
+  # Your Gmail (address + app password go in secrets.yaml under gmail:). Mail comes straight from
+  # Google to this laptop and is read by the local model. Sending always asks you first.
+  enabled: true
+  digest_important: true        # important unread mail in the morning digest
+  alert_senders: []             # phone alert for mail from these, e.g. ["@asu.edu", "Professor Smith"]
+
 voice_id:
   # Risky requests (send, delete, power...) in a voice that isn't yours need an Approve tap on
   # your phone instead of a spoken "yes". Enrol once: run.bat --enroll-voice
@@ -183,8 +190,12 @@ stt:
   fast_min_snr_db: 12
 
 tts:
-  engine: piper      # piper (natural, offline) or sapi (built-in Windows voice fallback)
-  piper_voice: models/piper/en_US-ryan-medium.onnx
+  # natural: a Microsoft natural voice (needs NaturalVoiceSAPIAdapter). "Online" voices send the
+  # text of Max's replies to Microsoft to be spoken (what you say and everything else stays local);
+  # Piper takes over automatically when offline. piper: fully local. sapi: built-in Windows voice.
+  engine: piper
+  natural_voice: Microsoft Ava Online
+  piper_voice: models/piper/en_US-hfc_male-medium.onnx   # was en_US-ryan-medium.onnx
   speed: 1.0
 
 safety:

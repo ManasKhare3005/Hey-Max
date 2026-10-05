@@ -19,6 +19,7 @@ class MaxApi(private val base: String, private val token: String) {
     companion object {
         private val JSON = "application/json".toMediaType()
         private val WAV = "audio/wav".toMediaType()
+        private val BINARY = "application/octet-stream".toMediaType()
 
         val http: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -89,6 +90,13 @@ class MaxApi(private val base: String, private val token: String) {
     suspend fun notesStatus() = JSONObject(get("/api/notes/status"))
     suspend fun notesStart(kind: String) = post("/api/notes/start", JSONObject().put("kind", kind))
     suspend fun notesStop() = post("/api/notes/stop")
+
+    /** Course documents: list (with which have notes), write notes, add a file from the phone. */
+    suspend fun documents() = JSONObject(get("/api/documents"))
+    suspend fun summarizeDocs(paths: List<String>, redo: Boolean = false) =
+        JSONObject(post("/api/documents/summarize", JSONObject().put("paths", JSONArray(paths)).put("redo", redo)))
+    suspend fun uploadDoc(name: String, bytes: ByteArray) = JSONObject(String(run(
+        request("/api/documents/upload?name=" + URLEncoder.encode(name, "UTF-8")).post(bytes.toRequestBody(BINARY)).build())))
 }
 
 fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }

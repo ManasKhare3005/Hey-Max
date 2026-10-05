@@ -28,11 +28,12 @@ class DayPlan:
     due_soon: list[CanvasItem] = field(default_factory=list)      # next 3 days
     classes: list[CanvasItem] = field(default_factory=list)
     reminders: list = field(default_factory=list)                # Reminder objects due that day
+    mail: list = field(default_factory=list)                     # important unread email (mail.Mail)
     canvas_error: str = ""
 
     @property
     def empty(self) -> bool:
-        return not (self.due_today or self.due_soon or self.classes or self.reminders)
+        return not (self.due_today or self.due_soon or self.classes or self.reminders or self.mail)
 
 
 def gather(ctx, day: dt.date | None = None) -> DayPlan:
@@ -48,6 +49,12 @@ def gather(ctx, day: dt.date | None = None) -> DayPlan:
             plan.canvas_error = str(exc)[:200]
     if ctx.reminders is not None:
         plan.reminders = [r for r in ctx.reminders.pending() if r.due.date() == day]
+    mail_cfg = ctx.cfg.get("mail", {}) or {}
+    if getattr(ctx, "mail", None) is not None and mail_cfg.get("digest_important", True):
+        try:   # Gmail's own "important" marker, unread, last 2 days
+            plan.mail = ctx.mail.search("is:important is:unread in:inbox newer_than:2d", 5)
+        except Exception as exc:
+            log.warning("digest: couldn't check mail (%s)", exc)
     return plan
 
 
@@ -62,6 +69,8 @@ def spoken(plan: DayPlan) -> str:
         parts.append("Reminders: " + ", ".join(f"{r.text} at {r.due.strftime('%I:%M %p').lstrip('0')}" for r in plan.reminders[:3]) + ".")
     if plan.due_soon:
         parts.append("Coming up: " + ", ".join(f"{i.title} ({i.course}, {i.start.strftime('%A')})" for i in plan.due_soon[:3]) + ".")
+    if plan.mail:
+        parts.append("Important email: " + ", ".join(f"{m.sender} about {m.subject}" for m in plan.mail[:3]) + ".")
     if not parts:
         return "Nothing due and no classes today. A free day."
     return " ".join(parts)
@@ -101,6 +110,7 @@ def render(plan: DayPlan, note: str, name: str = "Max") -> tuple[str, str, str]:
         ("Classes today", [f"{c.course} {c.title} {c.when}" + (f" · Zoom: {c.link}" if c.link else "") for c in plan.classes]),
         ("Reminders", [f"{r.text} at {r.due.strftime('%I:%M %p').lstrip('0')}" for r in plan.reminders]),
         ("Coming up (next 3 days)", [f"{i.title} ({i.course}) {when_day(i)}" for i in plan.due_soon]),
+        ("Important unread email", [f"{m.sender}: {m.subject}" for m in plan.mail]),
     ]
     text = [f"{day}", "", note, ""]
     for title, rows in sections:

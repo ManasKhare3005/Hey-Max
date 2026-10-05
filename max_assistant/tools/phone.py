@@ -143,15 +143,18 @@ def register(reg: ToolRegistry):
         begin = int(start.timestamp() * 1000)
         return ask("calendar", title=title, begin=begin, end=begin + int(duration_minutes or 60) * 60_000, location=location)
 
-    @reg.tool(
-        "Write an email in Gmail on the user's phone; it opens ready to send and the user taps Send.",
-        params={"to": {"type": "string", "description": "Contact name or email address"},
-                "subject": {"type": "string"}, "body": {"type": "string"}},
-        required=["to"],
-        direct=True,
-    )
     def phone_email(to: str, subject: str = "", body: str = ""):
         return ask("email", to=to, subject=subject, body=body)
+
+    # With Gmail connected (mail_send), emails go through Gmail only: offering both once sent two
+    if getattr(ctx, "mail", None) is None:
+        reg.tool(
+            "Write an email in Gmail on the user's phone; it opens ready to send and the user taps Send.",
+            params={"to": {"type": "string", "description": "Contact name or email address"},
+                    "subject": {"type": "string"}, "body": {"type": "string"}},
+            required=["to"],
+            direct=True,
+        )(phone_email)
 
     @reg.tool(
         "Read the user's recent phone notifications (messages, WhatsApp, Instagram, email...). Use for "

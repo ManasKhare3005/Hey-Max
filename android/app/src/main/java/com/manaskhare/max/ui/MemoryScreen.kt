@@ -1,5 +1,10 @@
 package com.manaskhare.max.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -30,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -39,7 +45,9 @@ import androidx.compose.ui.unit.sp
 import com.manaskhare.max.MainViewModel
 import com.manaskhare.max.objects
 import com.manaskhare.max.str
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /** Facts Max remembers, plus meeting & lecture notes (record from here too). */
@@ -132,6 +140,8 @@ private fun Notes(vm: MainViewModel, open: (JSONObject) -> Unit) {
         }
     }
     Spacer(Modifier.height(10.dp))
+    Documents(vm) { rev++ }
+    Spacer(Modifier.height(10.dp))
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items(items, key = { it.optInt("id") }) { n ->
             Card(Modifier.clickable { vm.call({ it.note(n.optInt("id")) }, open) }) {
@@ -140,6 +150,85 @@ private fun Notes(vm: MainViewModel, open: (JSONObject) -> Unit) {
                 Label("${n.str("started").replace("T", " ").take(16)} · ${n.str("kind")} · ${n.optInt("words")} words")
             }
         }
+    }
+}
+
+private val DOC_TYPES = arrayOf(
+    "application/pdf", "text/plain", "text/markdown",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+)
+
+private fun displayName(context: Context, uri: Uri): String? =
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst()) c.getString(0) else null
+    }
+
+/** Course documents: add a file from the phone (saved to the laptop's course folder) and get notes for it. */
+@Composable
+private fun Documents(vm: MainViewModel, changed: () -> Unit) {
+    val context = LocalContext.current
+    var info by remember { mutableStateOf<JSONObject?>(null) }
+    var rev by remember { mutableIntStateOf(0) }
+    var busy by remember { mutableStateOf("") }
+    var err by remember { mutableStateOf("") }
+    LaunchedEffect(rev) {
+        while (true) {                    // faster while Max is working through files
+            vm.call({ it.documents() }) { new ->
+                val wasActive = info?.optJSONObject("status")?.optBoolean("active") == true
+                info = new
+                if (wasActive && new.optJSONObject("status")?.optBoolean("active") != true) changed()
+            }
+            delay(if (info?.optJSONObject("status")?.optBoolean("active") == true) 3000 else 20000)
+        }
+    }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        busy = "Sending ${uris.size} file${if (uris.size > 1) "s" else ""} to the laptop…"
+        err = ""
+        vm.call({ api ->
+            runCatching {
+                for (u in uris) {
+                    val (name, bytes) = withContext(Dispatchers.IO) {
+                        (displayName(context, u) ?: "document.pdf") to
+                            (context.contentResolver.openInputStream(u)?.use { it.readBytes() } ?: ByteArray(0))
+                    }
+                    api.uploadDoc(name, bytes)
+                }
+            }
+        }) { r ->
+            busy = ""
+            r.onFailure { err = "Couldn't add it: ${it.message}" }
+            rev++
+        }
+    }
+
+    val i = info ?: return
+    val files = i.optJSONArray("files")?.objects() ?: emptyList()
+    val pending = files.filter { !it.optBoolean("done") }
+    val s = i.optJSONObject("status") ?: JSONObject()
+    val active = s.optBoolean("active")
+    Card {
+        Label("course documents")
+        Text("${files.size} files · ${files.size - pending.size} with notes", color = Text1)
+        if (active) {
+            val waiting = s.optJSONArray("waiting")?.length() ?: 0
+            Text("✍ Writing notes for ${s.str("current")}" + if (waiting > 0) " · $waiting waiting" else "",
+                 color = Text2, fontSize = 13.sp)
+        }
+        if (busy.isNotBlank()) Text(busy, color = Text2, fontSize = 13.sp)
+        if (err.isNotBlank()) Text(err, color = Red, fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            GhostButton("+ Add document", Modifier.weight(1f)) { if (busy.isBlank()) pick.launch(DOC_TYPES) }
+            if (!active && pending.isNotEmpty()) {
+                GhostButton("✍ Notes for ${pending.size}", Modifier.weight(1f)) {
+                    vm.call({ it.summarizeDocs(pending.map { f -> f.str("path") }) }) { rev++ }
+                }
+            }
+        }
+        Text("PDF, slides, Word or text. Max reads the whole file and writes notes here.",
+             color = Text2, fontSize = 12.5.sp, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
@@ -168,7 +257,7 @@ private fun NoteDetail(vm: MainViewModel, n: JSONObject, back: () -> Unit) {
             }
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-            listOf("Notes", "Summary", "Transcript").forEachIndexed { i, label ->
+            listOf("Notes", "Summary", if (n.str("kind") == "document") "Text" else "Transcript").forEachIndexed { i, label ->
                 SegmentedButton(selected = view == i, onClick = { view = i },
                                 shape = SegmentedButtonDefaults.itemShape(i, 3)) { Text(label) }
             }

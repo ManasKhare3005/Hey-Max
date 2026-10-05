@@ -6,7 +6,9 @@ Windows' built-in OCR (winocr), and the text handed to the local model with the 
 from __future__ import annotations
 
 import logging
+import re
 import sys
+import time
 
 from .registry import ForLLM, ToolRegistry
 
@@ -33,12 +35,49 @@ def front_window():
     return buf.value, (rect.left, rect.top, rect.right, rect.bottom)
 
 
-def ocr(image) -> str:
+def ocr_lines(image) -> list[str]:
     import winocr
 
     result = winocr.recognize_pil_sync(image.convert("RGB"), "en")
-    lines = [line["text"] for line in result.get("lines", [])] if isinstance(result, dict) else []
-    return "\n".join(lines) if lines else (result.get("text", "") if isinstance(result, dict) else "")
+    if not isinstance(result, dict):
+        return []
+    return [line["text"] for line in result.get("lines", [])] or ([result["text"]] if result.get("text") else [])
+
+
+def ocr(image) -> str:
+    return "\n".join(ocr_lines(image))
+
+
+# A blinking text cursor right after a word is read as "l", "I" or "|" ("hey how are youl").
+CURSOR_CHARS = "lI|!1"
+# Window furniture that isn't the content: status bars and menu bars (Notepad, VS Code, Office...)
+STATUS_BAR = re.compile(r"\bLn \d+, ?Col \d+\b|\b(UTF-8|UTF-16|Windows \(CRLF\)|Unix \(LF\)|Plain text|Spaces: \d+)\b", re.I)
+MENU_WORDS = {"file", "edit", "view", "selection", "go", "run", "terminal", "help", "format", "insert", "tools",
+              "window", "home", "layout", "references", "review", "draw", "design", "history", "bookmarks"}
+
+
+def merge_reads(first: list[str], second: list[str]) -> list[str]:
+    """Two reads ~0.6 s apart: where one line is the other plus a stray cursor-like last
+    character, keep the shorter (the cursor blinks, so it's only in one of them)."""
+    out = []
+    for i, a in enumerate(first):
+        b = second[i] if i < len(second) else a
+        if len(a) == len(b) + 1 and a.startswith(b) and a[-1] in CURSOR_CHARS:
+            a = b
+        out.append(a)
+    return out
+
+
+def clean(lines: list[str]) -> list[str]:
+    keep = []
+    for line in lines:
+        words = line.lower().split()
+        if words and all(w in MENU_WORDS for w in words):
+            continue                                          # "File Edit View"
+        if STATUS_BAR.search(line) and len(line) < 120:
+            continue                                          # "Ln 1, Col 16  100%  Windows (CRLF)  UTF-8"
+        keep.append(line)
+    return keep
 
 
 def capture(whole_screen: bool = False):
@@ -65,9 +104,14 @@ def register(reg: ToolRegistry):
         required=["question"],
     )
     def read_screen(question: str, whole_screen: bool = False):
+        image = None
         try:
             image, title = capture(bool(whole_screen))
-            text = ocr(image).strip()
+            first = ocr_lines(image)
+            time.sleep(0.6)                                      # a blink later: the text cursor flips
+            image, _ = capture(bool(whole_screen))
+            second = ocr_lines(image)
+            text = "\n".join(clean(merge_reads(first, second))).strip()
         except Exception as exc:
             return f"Error: couldn't read the screen ({exc})."
         finally:
@@ -76,5 +120,6 @@ def register(reg: ToolRegistry):
             return "I couldn't find any text in that window."
         if len(text) > MAX_CHARS:
             text = text[:MAX_CHARS].rsplit("\n", 1)[0] + "\n…"
-        return ForLLM(f"Text read from the user's screen (window: {title}):\n{text}\n\n"
+        return ForLLM(f"Text read from the user's screen by OCR (window: {title}). OCR can add or misread a letter, "
+                      f"so don't point out typos unless asked; ignore leftover menu or toolbar words.\n{text}\n\n"
                       f"Answer briefly, in 1-3 spoken sentences: {question}")

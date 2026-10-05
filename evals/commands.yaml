@@ -75,6 +75,8 @@ course_material:
   - {say: "what's on the midterm review sheet", expect: course_search}
   - {say: "according to the lecture slides what is entropy", expect: course_search}
   - {say: "what course material do you have", expect: course_files}
+  - {say: "summarize every file in my course folder", expect: summarize_course_files}
+  - {say: "make notes of the week 3 slides", expect: summarize_course_files}
 
 phone:
   - {say: "set a timer for 10 minutes on my phone", expect: phone_timer, args: {duration: "10"}}
@@ -90,7 +92,7 @@ phone:
   - {say: "take me to tempe marketplace", expect: phone_navigate, args: {destination: tempe}, origin: phone}
   - {say: "play some lofi on spotify", expect: phone_play, args: {app: spotify}, origin: phone}
   - {say: "add a study group to my calendar tomorrow at 3pm", expect: phone_calendar_add, origin: phone}
-  - {say: "email professor smith that i'll miss class", expect: phone_email, origin: phone}
+  - {say: "email professor smith that i'll miss class", expect: [mail_send, phone_email], origin: phone}
   - {say: "search youtube for cooking videos", expect: open_website, args: {site: youtube}, origin: phone}
 
 screen:
@@ -101,6 +103,22 @@ screen:
 files:
   - {say: "find the pdf i downloaded about sparql", expect: find_files}
   - {say: "open my resume", expect: [find_files, open_file]}
+
+mail:
+  - {say: "check my email", expect: mail_check}
+  - {say: "do i have any new emails", expect: mail_check}
+  - {say: "check my university email", expect: mail_check, args: {account: uni}}
+  - {say: "any new mail on my personal account", expect: mail_check, args: {account: personal}}
+  - {say: "any emails from professor smith", expect: mail_search, args: {query: smith}}
+  - {say: "find the email about my internship", expect: mail_search, args: {query: internship}}
+  - turns:
+      - {say: "check my email", expect: mail_check}
+      - {say: "read the first one", expect: mail_read}
+      - {say: "reply saying thanks i'll be there", expect: mail_reply, args: {text: thanks}}
+  - turns:
+      - {say: "check my inbox", expect: mail_check}
+      - {say: "archive the one from canvas", expect: mail_archive}
+  - {say: "email jane smith that i'll miss class tomorrow", expect: mail_send}
 
 time:
   - {say: "what time is it", expect: [get_datetime, none]}

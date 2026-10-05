@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Max</title>
+<style>
+  :root { --bg: #060A13; --cyan: #22D3EE; --text: #E6F6FB; --dim: #7C8BA1; --line: rgba(34, 211, 238, 0.16); }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+  body { display: grid; place-items: center;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 48px 48px; background-position: center; }
+  .box { text-align: center; padding: 40px 48px; background: rgba(6, 10, 19, 0.88); border: 1px solid var(--line); border-radius: 18px; }
+  .orb { width: 120px; height: 120px; margin: 0 auto 28px; border-radius: 50%;
+    background: radial-gradient(circle at 38% 34%, #E6FCFF 0 12%, var(--cyan) 30%, #0E7490 72%);
+    box-shadow: 0 0 60px rgba(34, 211, 238, 0.55); animation: breathe 2.4s ease-in-out infinite; }
+  .off .orb { filter: grayscale(1) brightness(0.6); animation: none; box-shadow: none; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; letter-spacing: 0.02em; }
+  p { margin: 0; color: var(--dim); font-size: 14px; }
+  .mono { font-family: Consolas, monospace; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--cyan); margin-bottom: 14px; }
+  button { margin-top: 22px; padding: 10px 22px; border-radius: 10px; border: none; cursor: pointer; font: inherit; font-weight: 600;
+    background: linear-gradient(135deg, #22d3ee, #2dd4bf); color: #04121a; display: none; }
+  .off button { display: inline-block; }
+  @keyframes breathe { 50% { transform: scale(1.06); box-shadow: 0 0 90px rgba(34, 211, 238, 0.75); } }
+  @media (prefers-reduced-motion: reduce) { .orb { animation: none; } }
+</style>
+</head>
+<body>
+  <div class="box" id="box">
+    <div class="orb"></div>
+    <div class="mono" id="tag">starting</div>
+    <h1 id="title">Starting Max…</h1>
+    <p id="msg">Loading speech and the language model. This takes up to a minute.</p>
+    <button id="start">Start Max</button>
+  </div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let since = Date.now();
+  function off() {
+    $("box").className = "off";
+    $("tag").textContent = "offline";
+    $("title").textContent = "Max is off";
+    $("msg").textContent = "Max didn't start, or was stopped. Check logs\\max.log if this keeps happening.";
+  }
+  async function tick() {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api) return setTimeout(tick, 200);
+    const s = await api.status();
+    if (s.online) return api.show_dashboard();
+    if (!s.starting) off();
+    else $("msg").textContent = `Loading speech and the language model… ${Math.round((Date.now() - since) / 1000)} s`;
+    setTimeout(tick, 1000);
+  }
+  $("start").onclick = async () => {
+    await window.pywebview.api.start();
+    since = Date.now();
+    $("box").className = "";
+    $("tag").textContent = "starting";
+    $("title").textContent = "Starting Max…";
+  };
+  let running = false;
+  const begin = () => { if (!running) { running = true; tick(); } };
+  window.addEventListener("pywebviewready", begin);
+  setTimeout(begin, 300);
+</script>
+</body>
+</html>

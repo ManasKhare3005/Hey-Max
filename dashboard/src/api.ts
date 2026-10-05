@@ -1,4 +1,4 @@
-import type { Fact, MaxState, NoteDetail, NoteItem, NotesStatus, NotesLive, Pairing, PrivacyCategory, Reminder, EvalData } from "./types";
+import type { DocsInfo, Fact, MaxState, NoteDetail, NoteItem, NotesStatus, NotesLive, Pairing, PrivacyCategory, Reminder, EvalData } from "./types";
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -43,6 +43,15 @@ export const api = {
   openNote: (id: number) => call<{ ok: boolean }>(`/api/notes/${id}/open`, { method: "POST" }),
   noteSummary: (id: number, refresh = false) =>
     call<{ summary_md: string }>(`/api/notes/${id}/summary${refresh ? "?refresh=true" : ""}`, { method: "POST" }),
+  documents: () => call<DocsInfo>("/api/documents"),
+  summarizeDocs: (paths: string[] = [], redo = false) =>
+    call<{ queued: string[]; skipped: string[] }>("/api/documents/summarize", { method: "POST", body: JSON.stringify({ paths, redo }) }),
+  uploadDoc: async (file: File, course = "") => {
+    const q = new URLSearchParams({ name: file.name, course });
+    const res = await fetch(`/api/documents/upload?${q}`, { method: "POST", body: file, headers: { "Content-Type": "application/octet-stream" } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
+    return res.json() as Promise<{ saved: string; name: string; summarizing: boolean }>;
+  },
   evals: () => call<EvalData>("/api/evals"),
   privacy: () => call<PrivacyCategory[]>("/api/privacy"),
   privacyDelete: (id: string) =>

@@ -56,6 +56,10 @@ export type NotesStatus = {
   active: boolean; finishing: boolean; title?: string; kind?: string; elapsed_s?: number; words?: number; last?: string;
 };
 
+export type DocFile = { path: string; name: string; course: string; done: boolean };
+export type DocsStatus = { active: boolean; current: string; waiting: string[]; done: string[]; failed: string[] };
+export type DocsInfo = { folder: string; files: DocFile[]; status: DocsStatus };
+
 export type Pairing = { enabled: boolean; url: string; token: string; link: string; qr_svg: string; tailscale: boolean };
 
 export type LiveLine = { t: string; text: string };

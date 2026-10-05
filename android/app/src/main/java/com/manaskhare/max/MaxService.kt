@@ -162,6 +162,11 @@ class MaxService : Service() {
                 "saved" -> notify(MaxApp.CH_UPDATE, "Notes ready", data.optString("title"))
                 "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
             }
+            "docnotes" -> when (data.optString("action")) {
+                "done" -> if (data.optInt("done") > 0)
+                    notify(MaxApp.CH_UPDATE, "Document notes ready", "${data.optInt("done")} file(s) · open Notes")
+                "failed" -> notify(MaxApp.CH_UPDATE, "Couldn't read a document", data.optString("title"))
+            }
             "phone_open" -> openLink(data.optString("url"), data.optString("title"))
             "alert" -> showAlert(event.optDouble("ts"), data)
             "phone_action" -> {

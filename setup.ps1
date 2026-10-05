@@ -70,10 +70,14 @@ Step "Installing Python packages (a few minutes the first time)"
 Step "Downloading the Piper voice"
 $voiceDir = Join-Path $PSScriptRoot "models\piper"
 New-Item -ItemType Directory -Force -Path $voiceDir | Out-Null
-$base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium"
-foreach ($f in @("en_US-ryan-medium.onnx", "en_US-ryan-medium.onnx.json")) {
-    $dest = Join-Path $voiceDir $f
-    if (-not (Test-Path $dest)) { Invoke-WebRequest -Uri "$base/$f" -OutFile $dest }
+# Max's voice (HFC Male) and the previous one (Ryan), both local
+foreach ($v in @("hfc_male/medium/en_US-hfc_male-medium", "ryan/medium/en_US-ryan-medium")) {
+    $base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/" + (Split-Path $v -Parent).Replace("\", "/")
+    $name = Split-Path $v -Leaf
+    foreach ($f in @("$name.onnx", "$name.onnx.json")) {
+        $dest = Join-Path $voiceDir $f
+        if (-not (Test-Path $dest)) { Invoke-WebRequest -Uri "$base/$f" -OutFile $dest }
+    }
 }
 Info "Voice ready."
 

@@ -22,6 +22,7 @@ from .config import resolve_path
 
 log = logging.getLogger(__name__)
 TYPES = {".pdf", ".pptx", ".docx", ".txt", ".md"}
+SKIP_NAMES = {"document-text.md"}          # text Max extracted when writing a document's notes (docnotes.TEXT_FILE)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, mtime REAL NOT NULL, size INTEGER NOT NULL, course TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -97,30 +98,37 @@ class CourseLibrary:
         rel = path.relative_to(root)
         return rel.parts[0] if len(rel.parts) > 1 else root.name
 
+    def files(self) -> list[tuple[Path, str]]:
+        """(path, course) of every readable file in the folders, sorted by course then name."""
+        out = []
+        for root in self.folders:
+            if not root.is_dir():
+                continue
+            for f in root.rglob("*"):
+                if f.is_file() and f.suffix.lower() in TYPES and not f.name.startswith(("~$", ".")) \
+                        and f.name not in SKIP_NAMES:
+                    out.append((f, self._course_of(f, root)))
+        return sorted(out, key=lambda pc: (pc[1].lower(), pc[0].name.lower()))
+
     def scan(self) -> dict:
         """Index new or changed files, drop deleted ones. Returns counts."""
         self.scanning = True
         added = removed = 0
         try:
             seen: set[str] = set()
-            for root in self.folders:
-                if not root.is_dir():
+            for f, course in self.files():
+                key = str(f.resolve())
+                seen.add(key)
+                st = f.stat()
+                with self.lock:
+                    row = self.db.execute("SELECT mtime, size FROM files WHERE path = ?", (key,)).fetchone()
+                if row and abs(row[0] - st.st_mtime) < 1 and row[1] == st.st_size:
                     continue
-                for f in root.rglob("*"):
-                    if not f.is_file() or f.suffix.lower() not in TYPES or f.name.startswith(("~$", ".")):
-                        continue
-                    key = str(f.resolve())
-                    seen.add(key)
-                    st = f.stat()
-                    with self.lock:
-                        row = self.db.execute("SELECT mtime, size FROM files WHERE path = ?", (key,)).fetchone()
-                    if row and abs(row[0] - st.st_mtime) < 1 and row[1] == st.st_size:
-                        continue
-                    try:
-                        self._index_file(f, key, self._course_of(f, root), st)
-                        added += 1
-                    except Exception as exc:
-                        log.warning("couldn't read %s: %s", f.name, exc)
+                try:
+                    self._index_file(f, key, course, st)
+                    added += 1
+                except Exception as exc:
+                    log.warning("couldn't read %s: %s", f.name, exc)
             with self.lock:
                 gone = [r[0] for r in self.db.execute("SELECT path FROM files") if r[0] not in seen]
                 for key in gone:

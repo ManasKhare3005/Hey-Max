@@ -134,7 +134,13 @@ class OverlayApi:
             return {"ok": False, "error": str(exc)[:160]}
 
     def open_dashboard(self):
-        webbrowser.open(self._base)
+        """Max's own window (the dashboard without a browser)."""
+        try:
+            from ..app import open_app
+
+            open_app()
+        except Exception:
+            webbrowser.open(self._base)
 
     # ----- the window itself -----
     def expand(self, expanded: bool):

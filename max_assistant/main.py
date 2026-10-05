@@ -25,6 +25,7 @@ from .tools import notes as notes_tools
 from .tools import phone as phone_tools
 from .tools import course as course_tools
 from .tools import screen as screen_tools
+from .tools import mail as mail_tools
 from .tools import memory as memory_tools
 from .tools import web as web_tools
 from .tools.registry import ToolRegistry
@@ -92,6 +93,8 @@ class Context:
         self.bus = None        # events.EventBus, set by build()
         self.phone = None      # phone.PhoneBridge: actions on the user's phone
         self.course = None     # course.CourseLibrary: slides, PDFs and lecture notes to answer from
+        self.docnotes = None   # docnotes.DocNotes: study notes written from course files
+        self.mail = None       # mail.GmailClient: the user's Gmail (app password in secrets.yaml)
 
 
 def setup_logging(cfg, verbose: bool):
@@ -169,6 +172,14 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
             folders.append(Path(os.path.expanduser(notes_cfg.get("folder", "~/Documents/Max Notes"))))
         folders[0].mkdir(parents=True, exist_ok=True)          # so there's an obvious place to drop files
         ctx.course = CourseLibrary(folders, ctx.memory.embedder, course_cfg.get("index", "data/course.db"))
+        if ctx.notes is not None:
+            from .docnotes import DocNotes
+
+            ctx.docnotes = DocNotes(ctx, ctx.course, ctx.notes.folder, ctx.notes.summarize, on_event=on_event)
+    if (cfg.get("mail", {}) or {}).get("enabled", True):
+        from .mail import accounts_from_secrets
+
+        ctx.mail = accounts_from_secrets((cfg.get("secrets", {}) or {}).get("gmail", {}) or {})   # None until set up
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
     web_tools.register(registry)
@@ -180,6 +191,7 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
     phone_tools.register(registry)
     course_tools.register(registry)
     screen_tools.register(registry)
+    mail_tools.register(registry)
     agent = Agent(
         llm, registry,
         fast_model=cfg.llm.fast_model,
@@ -252,6 +264,16 @@ def start_digest(ctx, bus=None):
                            d.get("catch_up_until", "18:00"), on_sent).start()
 
 
+def start_mail_alerts(ctx, bus):
+    """Phone alerts for mail from chosen senders (mail.alert_senders in config.yaml)."""
+    senders = (ctx.cfg.get("mail", {}) or {}).get("alert_senders") or []
+    if getattr(ctx, "mail", None) is None or ctx.memory is None or bus is None or not senders:
+        return None
+    from .alerts import MailAlerts
+
+    return MailAlerts(ctx, bus.publish, senders).start()
+
+
 def start_course(ctx):
     """Index course files in the background now and every 10 minutes."""
     if getattr(ctx, "course", None) is not None:
@@ -266,6 +288,16 @@ def start_alerts(ctx, bus):
     from .alerts import DeadlineAlerts
 
     return DeadlineAlerts(ctx, bus.publish, al.get("hours_before_due", [24, 3]), al.get("minutes_before_class", 10)).start()
+
+
+def documents_done_text(done: list[str], failed: list[str]) -> str:
+    n = len(done)
+    text = (f"Your notes for {done[0]} are ready in the Notes tab." if n == 1 else
+            f"Notes for all {n} files are ready in the Notes tab." if n and not failed else
+            f"Notes for {n} files are ready in the Notes tab." if n else "")
+    if failed:
+        text += f" I couldn't read {', '.join(f.split(' (')[0] for f in failed)}."
+    return text.strip()
 
 
 def start_reminders(ctx, announce):
@@ -349,6 +381,7 @@ def run_text(cfg, verbose: bool):
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, "(text mode)", "text"))
     start_digest(ctx, bus)
     start_alerts(ctx, bus)
+    start_mail_alerts(ctx, bus)
     start_course(ctx)
     bus.publish("stage", {"stage": "text mode"})
     start_reminders(ctx, lambda text: (bus.publish("reminder", {"action": "fired", "text": text}),
@@ -396,7 +429,7 @@ def make_voice_id(cfg):
     return vid
 
 
-ENROLL_LINES = ["Hey Max, what's due this week?", "Remind me to call my mom tomorrow at six.",
+ENROLL_LINES = ["What's due on Canvas this week?", "Remind me to call my mom tomorrow at six.",
                 "Open Spotify and play something relaxing.", "Take notes for this lecture, please.",
                 "What's the weather going to be like in Tempe today?", "Set a timer for ten minutes on my phone."]
 
@@ -490,7 +523,8 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
                        cfg.stt.get("fast_model_dir"), cfg.stt.get("fast_min_snr_db", 12.0),
                        cfg.stt.get("prompt"))
-    speaker = Speaker(cfg.tts.engine, cfg.tts.piper_voice, cfg.tts.speed, a.output_device, mic=mic)
+    speaker = Speaker(cfg.tts.engine, cfg.tts.piper_voice, cfg.tts.speed, a.output_device, mic=mic,
+                      natural_voice=cfg.tts.get("natural_voice", "Microsoft Ava Online"))
     heard_audio = {"last": None}              # the last recording, for voice ID
     voice_check = {"owner": None}             # did the current request sound like the user? (None = unknown)
     voice_id = make_voice_id(cfg)
@@ -619,6 +653,15 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
             toast("Max: notes ready", f"{result.title}: saved to {result.folder}")
 
         ctx.notes.on_done = notes_done
+    if ctx.docnotes is not None:
+        def docnotes_done(done, failed):
+            from .reminders import toast
+
+            text = documents_done_text(done, failed)
+            announcements.put(text)
+            toast("Max: document notes", text)
+
+        ctx.docnotes.on_done = docnotes_done
 
     def run_command(text: str, source: str = "dashboard") -> str:
         with agent_lock:
@@ -684,6 +727,7 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"), controls)
     digest = start_digest(ctx, bus)
     alerts = start_alerts(ctx, bus)  # noqa: F841
+    start_mail_alerts(ctx, bus)
     start_course(ctx)
     mic.start()
     beat.start()
