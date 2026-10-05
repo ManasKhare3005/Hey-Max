@@ -122,6 +122,17 @@ def git(*args: str, cwd: Path = ROOT) -> str:
     return out.strip()
 
 
+def clashes(porcelain: str, files: list[str]) -> list[str]:
+    """Files of a change that the main checkout has unsaved edits to, from raw (unstripped)
+    `git status --porcelain` output. Untracked files count too (the merge would refuse to
+    overwrite them); an untracked folder shows as 'dir/' and covers everything inside it."""
+    dirty = set()
+    for line in porcelain.splitlines():
+        if len(line) > 3:
+            dirty.update(p.strip().strip('"') for p in line[3:].split(" -> "))
+    return sorted(f for f in files if f in dirty or any(d.endswith("/") and f.startswith(d) for d in dirty))
+
+
 def describe_tool(name: str, args: dict) -> str:
     """One line for the phone: what Claude is doing right now."""
     path = Path(str(args.get("file_path") or args.get("path") or "")).name
@@ -326,10 +337,22 @@ class DevLoop:
         job = self.get(job_id)
         if job.status != "ready":
             raise RuntimeError(f"That change is {job.status}, not waiting for approval.")
-        dirty = [l[3:] for l in git("status", "--porcelain").splitlines() if not l.startswith("??")]
-        overlap = sorted(set(dirty) & set(job.files))
+        try:
+            self._merge(job)
+        except Exception as exc:                         # stays "ready"; the phone shows why
+            log.warning("approving dev job %s failed: %s", job.id, exc)
+            self._update(job, error=f"Approve failed: {str(exc)[:500]}")
+            raise RuntimeError(str(exc)) from exc
+        return job
+
+    def _merge(self, job: Job):
+        code, status = run(["git", "status", "--porcelain", "--untracked-files=all"], ROOT, timeout=120)
+        if code != 0:
+            raise RuntimeError("git status: " + status.strip()[-300:])
+        overlap = clashes(status, job.files)             # raw output: strip() would eat the first line's " M"
         if overlap:
-            raise RuntimeError("These files have unsaved edits on the laptop: " + ", ".join(overlap[:5]))
+            raise RuntimeError("These files have unsaved edits on the laptop: " + ", ".join(overlap[:5]) +
+                               ". Commit or undo them on the laptop, then approve again.")
         self._cleanup(job, delete_branch=False)
         try:
             git("merge", "--no-ff", "-q", "-m", f"Merge phone request {job.id}: {job.request[:50]}", job.branch)
@@ -342,10 +365,9 @@ class DevLoop:
         pending = APK_DIR / f"pending-{job.id}.apk"
         if pending.exists():
             pending.replace(APK)
-        self._update(job, status="merged")
+        self._update(job, status="merged", error="")
         if any(f.startswith("max_assistant/") or f == "config.yaml" for f in job.files):
             threading.Timer(2.0, self.restart).start()     # let the API answer first
-        return job
 
     def reject(self, job_id: int) -> Job:
         job = self.get(job_id)

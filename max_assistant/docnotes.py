@@ -112,13 +112,46 @@ def write_notes(path: Path, summarize: Callable[[str, str, int], str], course: s
     return DocResult(title, path, course, notes, text_md, words, len(items))
 
 
-def save(result: DocResult, folder: Path, when: dt.datetime) -> Path:
-    """Write notes.md + the extracted text into '<folder>/<date> <title>/'."""
-    base = folder / f"{when:%Y-%m-%d %H%M} {safe_name(result.title)}"
+def combined_title(items: list[tuple[Path, str]], course: str = "") -> str:
+    """'CSE 579 combined summary': named after the course the files are in."""
+    courses = {c for _, c in items if c}
+    label = courses.pop() if len(courses) == 1 else course.strip() or "Course files"
+    return f"{label} combined summary"
+
+
+def body_of(notes_md: str) -> str:
+    """A file's saved notes without the title line, the header and the exact-quote section
+    (the combined summary quotes the files again itself)."""
+    text = re.sub(r"\A# .*\n+(\*.*\*\n+)?", "", notes_md)
+    return text.split("\n## Deadlines & dates (exact quotes)")[0].strip()
+
+
+def write_combined(parts: list[tuple[str, str]], summarize: Callable[[str, str, int], str],
+                   quotes: list[tuple[str, str]] = ()) -> str:
+    """One set of notes from several files' notes: parts = [(file name, notes)]. Same merge/reduce
+    as a single file, so it fits the small model however many files there are."""
+    chunks = [f"### {name}\n{notes}" for name, notes in parts]
+    while sum(len(c.split()) for c in chunks) > 1800 and len(chunks) > 1:
+        chunks = [summarize(MERGE_PROMPT.format(kind="set of course documents"), "\n\n".join(chunks[i:i + 3]), 600).strip()
+                  for i in range(0, len(chunks), 3)]
+    notes = summarize(REDUCE_PROMPT.format(kind="set of course documents"), "\n\n".join(chunks), 1100).strip()
+    if quotes:
+        notes += "\n\n## Deadlines & dates (exact quotes)\n" + "\n".join(f"- [{loc}] “{q}”" for loc, q in quotes)
+    return notes
+
+
+def new_folder(folder: Path, title: str, when: dt.datetime) -> Path:
+    base = folder / f"{when:%Y-%m-%d %H%M} {safe_name(title)}"
     target, n = base, 2
     while target.exists():
         target, n = Path(f"{base} ({n})"), n + 1
     target.mkdir(parents=True)
+    return target
+
+
+def save(result: DocResult, folder: Path, when: dt.datetime) -> Path:
+    """Write notes.md + the extracted text into '<folder>/<date> <title>/'."""
+    target = new_folder(folder, result.title, when)
     course = f"{result.course} · " if result.course else ""
     header = (f"# {result.title}\n\n*Document · {course}{result.source.name} · {result.pages} pages · "
               f"{result.words} words · notes written {when:%B %d, %Y}*\n\n")
@@ -130,7 +163,8 @@ def save(result: DocResult, folder: Path, when: dt.datetime) -> Path:
 
 class DocNotes:
     """Queue of course files to write notes for, worked through one at a time in the background.
-    `on_event("docnotes", {...})` fires per file (started, saved, failed); `on_done(done, failed)` at the end."""
+    `on_event("docnotes", {...})` fires per file (started, saved, failed); `on_done(done, failed)` at the end.
+    A combined summary (one note for several files) waits until their own notes are written."""
 
     def __init__(self, ctx, library, folder: Path, summarize: Callable[[str, str, int], str],
                  on_event: Callable[[str, dict], None] | None = None,
@@ -142,11 +176,13 @@ class DocNotes:
         self.on_event = on_event or (lambda kind, data: None)
         self.on_done = on_done or (lambda done, failed: None)
         self._queue: deque[tuple[Path, str]] = deque()
+        self._combine: deque[tuple[str, str, list[Path]]] = deque()     # (title, course, files)
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self.current = ""
         self.done: list[str] = []
         self.failed: list[str] = []
+        self.combined: list[str] = []          # combined summaries written in the last run
 
     # ----- which files -----
     def files(self) -> list[tuple[Path, str]]:
@@ -175,9 +211,19 @@ class DocNotes:
         note = mem.note(info.get("note", -1))
         return note is not None and Path(note["folder"]).exists() and abs(info.get("mtime", 0) - path.stat().st_mtime) < 1
 
+    def file_notes(self, path: Path) -> str:
+        """The saved notes for a file ('' if it has none yet)."""
+        if not self.is_done(path):
+            return ""
+        note = self.ctx.memory.note(json.loads(self.ctx.memory.get(DONE_KEY + str(path.resolve())))["note"])
+        f = Path(note["folder"]) / "notes.md"
+        return body_of(f.read_text(encoding="utf-8")) if f.exists() else ""
+
     # ----- the queue -----
-    def enqueue(self, items: list[tuple[Path, str]], redo: bool = False) -> tuple[list[Path], list[Path]]:
-        """Add files; returns (queued, skipped because their notes already exist)."""
+    def enqueue(self, items: list[tuple[Path, str]], redo: bool = False,
+                combine: str = "") -> tuple[list[Path], list[Path]]:
+        """Add files; returns (queued, skipped because their notes already exist). With `combine`
+        (a title), one combined summary of all the files is written after their own notes."""
         queued, skipped = [], []
         with self._lock:
             waiting = {p for p, _ in self._queue} | ({Path(self.current)} if self.current else set())
@@ -189,38 +235,80 @@ class DocNotes:
                     continue
                 self._queue.append((p, c))
                 queued.append(p)
-            if queued and (self._worker is None or not self._worker.is_alive()):
-                self.done, self.failed = [], []
+            if combine and combine not in {t for t, _, _ in self._combine}:
+                self._combine.append((combine, items[0][1] if items else "", [p for p, _ in items]))
+            if (queued or self._combine) and (self._worker is None or not self._worker.is_alive()):
+                self.done, self.failed, self.combined = [], [], []
                 self._worker = threading.Thread(target=self._work, name="doc-notes", daemon=True)
                 self._worker.start()
         return queued, skipped
 
     def status(self) -> dict:
         with self._lock:
-            return {"active": bool(self.current or self._queue), "current": Path(self.current).name if self.current else "",
-                    "waiting": [p.name for p, _ in self._queue], "done": list(self.done), "failed": list(self.failed)}
+            return {"active": bool(self.current or self._queue or self._combine),
+                    "current": Path(self.current).name if self.current else "",
+                    "waiting": [p.name for p, _ in self._queue] + [t for t, _, _ in self._combine],
+                    "done": list(self.done), "failed": list(self.failed)}
 
     def _work(self):
         while True:
             with self._lock:
-                if not self._queue:
+                if self._queue:
+                    path, course = self._queue.popleft()
+                    self.current, job = str(path), None
+                elif self._combine:
+                    job = self._combine.popleft()
+                    self.current = job[0]
+                else:
                     self.current = ""
                     done, failed = list(self.done), list(self.failed)
                     break
-                path, course = self._queue.popleft()
-                self.current = str(path)
-            self.on_event("docnotes", {"action": "started", "title": path.stem})
+            title = job[0] if job else path.stem
+            self.on_event("docnotes", {"action": "started", "title": title})
             try:
-                self._one(path, course)
-                with self._lock:
-                    self.done.append(path.stem)
+                if job:
+                    self._combined(*job)
+                    with self._lock:
+                        self.combined.append(title)
+                else:
+                    self._one(path, course)
+                    with self._lock:
+                        self.done.append(title)
             except Exception as exc:
-                log.warning("notes for %s failed: %s", path.name, exc)
+                log.warning("notes for %s failed: %s", title, exc)
                 with self._lock:
-                    self.failed.append(f"{path.stem} ({str(exc)[:80]})")
-                self.on_event("docnotes", {"action": "failed", "title": path.stem, "error": str(exc)[:200]})
+                    self.failed.append(f"{title} ({str(exc)[:80]})")
+                self.on_event("docnotes", {"action": "failed", "title": title, "error": str(exc)[:200]})
         self.on_event("docnotes", {"action": "done", "done": len(done), "failed": len(failed)})
         self.on_done(done, failed)
+
+    def _combined(self, title: str, course: str, paths: list[Path]):
+        parts = [(p.stem, n) for p in paths if (n := self.file_notes(p))]
+        if not parts:
+            raise ValueError("none of the files have notes to combine")
+        quotes = []
+        for p in paths:
+            try:
+                items = [(loc, t) for loc, t in pages(p) if t.strip()]
+            except Exception:
+                continue
+            quotes += [(f"{p.stem}, {loc}", q) for loc, q in date_quotes(items)]
+        notes = write_combined(parts, self.summarize, quotes[:25])
+        now = dt.datetime.now()
+        target = new_folder(self.folder, title, now)
+        where = f"{course} · " if course else ""
+        names = ", ".join(name for name, _ in parts)
+        header = (f"# {title}\n\n*Combined summary · {where}{len(parts)} documents · notes written "
+                  f"{now:%B %d, %Y}*\n\n*Files: {names}*\n\n")
+        (target / "notes.md").write_text(header + notes + "\n", encoding="utf-8")
+        (target / TEXT_FILE).write_text("# Notes for each file\n\n" + "\n\n".join(f"## {name}\n\n{n}" for name, n in parts)
+                                        + "\n", encoding="utf-8")
+        summary = extract_summary(notes)
+        mem = self.ctx.memory
+        if mem is not None:
+            stamp = now.isoformat(timespec="seconds")
+            mem.add_notes(title, "document", stamp, stamp, str(target), summary, sum(len(n.split()) for _, n in parts))
+        self.on_event("docnotes", {"action": "saved", "title": title, "folder": str(target), "summary": summary})
 
     def _one(self, path: Path, course: str) -> DocResult:
         now = dt.datetime.now()

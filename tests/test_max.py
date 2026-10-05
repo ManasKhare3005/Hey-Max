@@ -2249,6 +2249,66 @@ def test_summarize_everything_in_the_course_folder_goes_straight_to_the_tool():
     assert direct_route("what did the professor say about all of it", tools) is None
 
 
+def test_one_combined_summary_of_a_courses_documents(tmp_path):
+    from max_assistant.course import CourseLibrary
+    from max_assistant.docnotes import DocNotes, body_of
+    from max_assistant.main import documents_done_text
+    from max_assistant.tools import course as course_tools
+
+    course = tmp_path / "Course" / "CSE 579"
+    course.mkdir(parents=True)
+    (course / "Week 1.txt").write_text("Knowledge representation and logic programs. Homework 1 is due "
+                                       "September 3 at 11:59 PM.", encoding="utf-8")
+    (course / "Week 2.txt").write_text("Answer set programming with clingo and stable models.", encoding="utf-8")
+    (tmp_path / "Course" / "Other.txt").write_text("A file from another course entirely.", encoding="utf-8")
+    reg, ctx = memory_registry()
+    notes_dir = tmp_path / "Max Notes"
+    lib = CourseLibrary([tmp_path / "Course", notes_dir], WordEmbedder(), tmp_path / "course.db")
+    fake, finished = FakeSummarizer(), threading.Event()
+    ctx.course = lib
+    ctx.docnotes = DocNotes(ctx, lib, notes_dir, fake, on_done=lambda d, f: finished.set())
+    course_tools.register(reg)
+
+    # Week 1 already has notes: they're reused, only Week 2 is written before combining
+    assert reg.run("summarize_course_files", {"file": "week 1"}).startswith("Writing notes for Week 1")
+    assert finished.wait(10)
+    finished.clear()
+    out = reg.run("summarize_course_files", {"course": "CSE 579", "combine": True})
+    assert out.startswith("Writing notes for Week 2 first, then one combined summary of all 2 files, "
+                          "called CSE 579 combined summary.")
+    assert finished.wait(10)
+    notes = {n["title"]: n for n in ctx.memory.notes()}
+    assert sorted(notes) == ["CSE 579 combined summary", "Week 1", "Week 2"]
+    combined = notes["CSE 579 combined summary"]
+    text = (Path(combined["folder"]) / "notes.md").read_text(encoding="utf-8")
+    assert "*Combined summary · CSE 579 · 2 documents" in text and "*Files: Week 1, Week 2*" in text
+    assert "- [Week 1, section 1] “Homework 1 is due September 3 at 11:59 PM.”" in text   # quoted, with its file
+    assert "### Week 1" in fake.calls[-1][1] and "### Week 2" in fake.calls[-1][1]        # built from both files' notes
+    assert "exact quotes" not in fake.calls[-1][1] and "Other" not in text
+    assert ctx.docnotes.combined == ["CSE 579 combined summary"]
+    assert documents_done_text(["Week 2"], [], ["CSE 579 combined summary"]) == \
+        "Your notes for Week 2 are ready in the Notes tab. The CSE 579 combined summary is ready too."
+    assert documents_done_text([], [], ["CSE 579 combined summary"]) == \
+        "Your CSE 579 combined summary is ready in the Notes tab."
+    # Asked again: nothing to redo, so straight to the combined summary
+    finished.clear()
+    assert reg.run("summarize_course_files", {"course": "CSE 579", "combine": True}).startswith(
+        "Writing one combined summary of all 2 files")
+    assert finished.wait(10) and len(ctx.memory.notes()) == 4
+    assert body_of("# T\n\n*Document · x*\n\n## Summary\nS\n\n## Deadlines & dates (exact quotes)\n- q") == "## Summary\nS"
+
+
+def test_combined_summary_requests_go_straight_to_the_tool():
+    from max_assistant.agent import direct_route
+
+    tools = {"summarize_course_files": None}
+    want = ("summarize_course_files", {"course": "CSE 579", "combine": True})
+    assert direct_route("summarise all the documents from cse579 at once and create a single summary", tools) == want
+    assert direct_route("make one summary of all my CSE 579 slides", tools) == want
+    assert direct_route("summarize all the cse573 slides", tools) == ("summarize_course_files", {"course": "CSE 573"})
+    assert direct_route("give me one summary of this web page", tools) is None
+
+
 def test_api_adds_a_document_and_writes_its_notes(tmp_path):
     from max_assistant.course import CourseLibrary
     from max_assistant.docnotes import DocNotes
@@ -2269,6 +2329,7 @@ def test_api_adds_a_document_and_writes_its_notes(tmp_path):
     note = client.get(f"/api/notes/{ctx.memory.notes()[0]['id']}").json()
     assert note["kind"] == "document" and "Ontologies" in note["transcript_md"] and "Homework 2" in note["notes_md"]
     assert client.post("/api/documents/summarize", json={"paths": [files[0]["path"]]}).json()["skipped"] == ["Week 2.txt"]
+    assert client.post("/api/documents/summarize", json={"combine": True}).json()["combined"] == ""   # one file: nothing to combine
 
 
 # ---------- change Max from the phone (devloop.py) ----------
@@ -2293,6 +2354,30 @@ def test_dev_requests_one_at_a_time_and_need_a_decision(tmp_path, monkeypatch):
     assert devloop.DevLoop().get(1).status == "failed"            # Max restarted mid-job: never left hanging
     assert devloop.describe_tool("Edit", {"file_path": "C:/x/max_assistant/agent.py"}) == "Editing agent.py"
     assert devloop.describe_tool("Bash", {"command": ".venv/Scripts/python -m pytest -q"}) == "Running the tests"
+
+
+def test_dev_approve_checks_laptop_edits_and_keeps_the_error(tmp_path, monkeypatch):
+    from max_assistant import devloop
+
+    # Raw porcelain: the first line starts with a space, which used to be stripped (cutting a letter off)
+    status = " M max_assistant/server.py\nM  config.yaml\nR  old.py -> max_assistant/new.py\n?? tests/new_test.py\n?? data2/\n"
+    files = ["max_assistant/server.py", "max_assistant/agent.py", "tests/new_test.py", "max_assistant/new.py",
+             "data2/x.txt", "config.yaml"]
+    assert devloop.clashes(status, files) == ["config.yaml", "data2/x.txt", "max_assistant/new.py",
+                                              "max_assistant/server.py", "tests/new_test.py"]
+    assert devloop.clashes("", files) == []
+
+    monkeypatch.setattr(devloop, "JOBS_FILE", tmp_path / "jobs.json")
+    monkeypatch.setattr(devloop, "DATA", tmp_path)
+    monkeypatch.setattr(devloop.DevLoop, "_work", lambda self, job: None)
+    monkeypatch.setattr(devloop, "run", lambda cmd, cwd, timeout=900, env=None: (0, status))
+    loop = devloop.DevLoop()
+    job = loop.submit("fix the approve button")
+    job.status, job.files = "ready", ["max_assistant/server.py"]
+    with pytest.raises(RuntimeError, match="unsaved edits on the laptop: max_assistant/server.py"):
+        loop.approve(job.id)
+    saved = devloop.DevLoop().get(job.id)                          # the phone sees why, after a reload too
+    assert saved.status == "ready" and saved.error.startswith("Approve failed: These files have unsaved edits")
 
 
 def test_dev_api_and_app_update(tmp_path, monkeypatch):

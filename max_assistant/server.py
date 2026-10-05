@@ -62,6 +62,7 @@ class DocsSummarize(BaseModel):
     paths: list[str] = []          # exact files; empty = every course file (or those matching course)
     course: str = ""
     redo: bool = False
+    combine: bool = False          # also one combined summary of all the chosen files
 
 
 class DevRequest(BaseModel):
@@ -499,8 +500,11 @@ def create_app(rt: Runtime) -> FastAPI:
             items = [(p, c) for p, c in items if str(p) in want]
         if not items:
             raise HTTPException(404, "no matching course files")
-        queued, skipped = d.enqueue(items, redo=body.redo)
-        return {"queued": [p.name for p in queued], "skipped": [p.name for p in skipped]}
+        from .docnotes import combined_title
+
+        title = combined_title(items, body.course) if body.combine and len(items) > 1 else ""
+        queued, skipped = d.enqueue(items, redo=body.redo, combine=title)
+        return {"queued": [p.name for p in queued], "skipped": [p.name for p in skipped], "combined": title}
 
     @app.post("/api/documents/upload")
     async def docs_upload(request: Request, name: str, course: str = "", summarize: bool = True):

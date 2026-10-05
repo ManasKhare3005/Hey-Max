@@ -77,6 +77,7 @@ course_material:
   - {say: "what course material do you have", expect: course_files}
   - {say: "summarize every file in my course folder", expect: summarize_course_files}
   - {say: "make notes of the week 3 slides", expect: summarize_course_files}
+  - {say: "make one summary of all my CSE 579 slides", expect: summarize_course_files}
 
 phone:
   - {say: "set a timer for 10 minutes on my phone", expect: phone_timer, args: {duration: "10"}}
