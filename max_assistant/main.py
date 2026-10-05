@@ -296,11 +296,13 @@ def start_alerts(ctx, bus):
     return DeadlineAlerts(ctx, bus.publish, al.get("hours_before_due", [24, 3]), al.get("minutes_before_class", 10)).start()
 
 
-def documents_done_text(done: list[str], failed: list[str]) -> str:
+def documents_done_text(done: list[str], failed: list[str], combined: list[str] = ()) -> str:
     n = len(done)
     text = (f"Your notes for {done[0]} are ready in the Notes tab." if n == 1 else
             f"Notes for all {n} files are ready in the Notes tab." if n and not failed else
             f"Notes for {n} files are ready in the Notes tab." if n else "")
+    for title in combined:
+        text += f" The {title} is ready too." if n else f" Your {title} is ready in the Notes tab."
     if failed:
         text += f" I couldn't read {', '.join(f.split(' (')[0] for f in failed)}."
     return text.strip()
@@ -663,7 +665,7 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         def docnotes_done(done, failed):
             from .reminders import toast
 
-            text = documents_done_text(done, failed)
+            text = documents_done_text(done, failed, list(ctx.docnotes.combined))
             announcements.put(text)
             toast("Max: document notes", text)
 

@@ -131,6 +131,12 @@ NOTES_START = re.compile(r"\btake\s+(some\s+)?notes\b|\b(start|begin)\s+(taking\
 SUMMARIZE_ALL = re.compile(r"\b(summari[sz]e|sum up|(make|write|take)\s+(study\s+)?notes)\b(?=.*\b(each|every|all|everything)\b)"
                            r"(?=.*\b(course|class|[a-z]{2,4}\s?\d{3})\b)(?=.*\b(files?|pdfs?|slides?|documents?|docs|readings?|"
                            r"handouts?|folder|material)\b)", re.I)
+# "one summary of all my CSE 579 slides", "summarise them all at once": one combined note
+COMBINE = re.compile(r"\b(one|single|combined?|merged?|overall|unified)\s+(\w+\s+){0,2}(summary|summaries|notes?)\b|"
+                     r"\b(at once|together|into one|in one go)\b", re.I)
+SUMMARY_WORDS = re.compile(r"\bsummar|\bnotes?\b", re.I)
+COURSE_DOCS = re.compile(r"(?=.*\b(course|class|[a-z]{2,4}\s?\d{3})\b)(?=.*\b(files?|pdfs?|slides?|documents?|docs|"
+                         r"readings?|handouts?|folder|material)\b)", re.I)
 COURSE_CODE = re.compile(r"\b([a-z]{2,4})\s?(\d{3})\b", re.I)
 MEETING_WORDS = re.compile(r"\b(meeting|zoom|teams|call|google meet|webex|video|webinar|stream)\b", re.I)
 
@@ -145,9 +151,11 @@ def direct_route(user_text: str, tools) -> tuple[str, dict] | None:
         return "stop_notes", {}
     if "start_notes" in tools and NOTES_START.search(text):
         return "start_notes", {"kind": "meeting" if MEETING_WORDS.search(text) else "lecture"}
-    if "summarize_course_files" in tools and SUMMARIZE_ALL.search(text):
+    combine = bool(COMBINE.search(text) and SUMMARY_WORDS.search(text) and COURSE_DOCS.match(text))
+    if "summarize_course_files" in tools and (combine or SUMMARIZE_ALL.search(text)):
         code = COURSE_CODE.search(text)
-        return "summarize_course_files", {"course": f"{code.group(1).upper()} {code.group(2)}" if code else ""}
+        args = {"course": f"{code.group(1).upper()} {code.group(2)}" if code else ""}
+        return "summarize_course_files", {**args, "combine": True} if combine else args
     return None
 
 

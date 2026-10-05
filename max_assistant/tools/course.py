@@ -44,19 +44,22 @@ def register(reg: ToolRegistry):
     docs = getattr(ctx, "docnotes", None)
     if docs is None:
         return
+    from ..docnotes import combined_title
 
     @reg.tool(
         "Read files from the user's course folder in full and write study notes for each one (summary, key "
         "points, deadlines), saved in the Notes tab on the dashboard and phone. Runs in the background. Use for "
         "'summarize my course files', 'make notes of every PDF in my course folder', 'summarize the CSE 573 "
-        "slides', 'summarise each of them'. Leave 'file' empty for all files.",
+        "slides', 'summarise each of them'. Leave 'file' empty for all files. Set 'combine' for ONE summary of "
+        "all the files together: 'one summary of all my CSE 579 slides', 'summarise them all at once'.",
         params={"course": {"type": "string", "description": "Optional course (subfolder), e.g. 'CSE 573'"},
                 "file": {"type": "string", "description": "Optional words from ONE file's name; empty = every file"},
-                "redo": {"type": "boolean", "description": "Write the notes again even if they already exist"}},
+                "redo": {"type": "boolean", "description": "Write the notes again even if they already exist"},
+                "combine": {"type": "boolean", "description": "Also write one combined summary of all the files"}},
         required=[],
         direct=True,
     )
-    def summarize_course_files(course: str = "", file: str = "", redo: bool = False):
+    def summarize_course_files(course: str = "", file: str = "", redo: bool = False, combine: bool = False):
         everything = docs.files()
         if not everything:
             return f"Your course folder is empty. Put PDFs, slides or Word files in {lib.folders[0]}."
@@ -64,7 +67,13 @@ def register(reg: ToolRegistry):
         if not items:
             names = ", ".join(p.stem for p, _ in everything[:12])
             return f"No course file matches that. The files I have are: {names}."
-        queued, skipped = docs.enqueue(items, redo=redo)
+        title = combined_title(items, course) if combine and len(items) > 1 else ""
+        queued, skipped = docs.enqueue(items, redo=redo, combine=title)
+        if title:
+            minutes = max(1, round(len(queued) * 0.75 + 0.5))
+            first = f"Writing notes for {_names(queued)} first, then " if queued else "Writing "
+            return (f"{first}one combined summary of all {len(items)} files, called {title}. That takes about "
+                    f"{minutes} minute{'s' if minutes > 1 else ''}; I'll tell you when it's in the Notes tab.")
         if not queued:
             if skipped:
                 return (f"I already wrote notes for {_names(skipped)}. They're in the Notes tab. "
