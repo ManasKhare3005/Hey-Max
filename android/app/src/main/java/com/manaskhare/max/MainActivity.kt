@@ -39,6 +39,8 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
@@ -119,7 +121,8 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                 ) { pad ->
-                    Box(Modifier.fillMaxSize().padding(pad)) {
+                    // Edge-to-edge: make room for the keyboard ourselves (minus the nav bar it covers)
+                    Box(Modifier.fillMaxSize().padding(pad).consumeWindowInsets(pad).imePadding()) {
                         when (tab) {
                             0 -> HomeScreen(vm, ::withMic)
                             1 -> ChatScreen(vm)

@@ -118,6 +118,14 @@ mail:
   digest_important: true        # important unread mail in the morning digest
   alert_senders: []             # phone alert for mail from these, e.g. ["@asu.edu", "Professor Smith"]
 
+dev:
+  # Change Max from the phone (Settings -> "Change Max"): the request goes to Claude Code on this
+  # laptop, which works on its own git branch; tests run, then you Approve or Reject on the phone.
+  # Approved changes are merged into main (never pushed) and Max restarts. Needs `claude` logged in.
+  enabled: true
+  model: ""                 # empty = Claude Code's default
+  timeout_minutes: 40
+
 voice_id:
   # Risky requests (send, delete, power...) in a voice that isn't yours need an Approve tap on
   # your phone instead of a spoken "yes". Enrol once: run.bat --enroll-voice

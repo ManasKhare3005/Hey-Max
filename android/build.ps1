@@ -16,6 +16,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Gradle build failed" }
     $apk = Resolve-Path "app\build\outputs\apk\debug\app-debug.apk"
     Write-Host "APK: $apk"
+    # The phone app's Settings -> Update installs this copy (served by Max over Tailscale)
+    $published = Join-Path $PSScriptRoot "..\data\app"
+    New-Item -ItemType Directory -Force $published | Out-Null
+    Copy-Item $apk (Join-Path $published "max.apk") -Force
     if ($NoInstall) { return }
     $devices = (& adb devices) | Select-Object -Skip 1 | Where-Object { $_ -match "\tdevice$" }
     if (-not $devices) {

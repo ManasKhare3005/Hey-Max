@@ -94,6 +94,7 @@ class Context:
         self.phone = None      # phone.PhoneBridge: actions on the user's phone
         self.course = None     # course.CourseLibrary: slides, PDFs and lecture notes to answer from
         self.docnotes = None   # docnotes.DocNotes: study notes written from course files
+        self.dev = None        # devloop.DevLoop: changes to Max requested from the phone, made by Claude Code
         self.mail = None       # mail.GmailClient: the user's Gmail (app password in secrets.yaml)
 
 
@@ -180,6 +181,11 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
         from .mail import accounts_from_secrets
 
         ctx.mail = accounts_from_secrets((cfg.get("secrets", {}) or {}).get("gmail", {}) or {})   # None until set up
+    dev_cfg = cfg.get("dev", {}) or {}
+    if dev_cfg.get("enabled", False):
+        from .devloop import DevLoop
+
+        ctx.dev = DevLoop(on_event=on_event, model=dev_cfg.get("model", ""), timeout_min=dev_cfg.get("timeout_minutes", 40))
     registry = ToolRegistry(context=ctx)
     system_tools.register(registry)
     web_tools.register(registry)
@@ -724,6 +730,14 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     from .events import Controls
 
     controls = Controls()
+    if ctx.dev is not None:
+        from .devloop import restart_max_detached
+
+        def restart():                           # a change approved on the phone: come back with the new code
+            restart_max_detached()
+            controls.quit.set()
+
+        ctx.dev.restart = restart
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"), controls)
     digest = start_digest(ctx, bus)
     alerts = start_alerts(ctx, bus)  # noqa: F841

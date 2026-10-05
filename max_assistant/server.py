@@ -64,6 +64,10 @@ class DocsSummarize(BaseModel):
     redo: bool = False
 
 
+class DevRequest(BaseModel):
+    text: str
+
+
 class Speak(BaseModel):
     text: str
 
@@ -424,6 +428,52 @@ def create_app(rt: Runtime) -> FastAPI:
         except Exception as exc:
             raise HTTPException(503, f"couldn't write the summary: {exc}")
         return {"summary_md": text}
+
+    # ----- change Max from the phone (Claude Code on this laptop) + phone app updates -----
+    def dev():
+        if getattr(rt.ctx, "dev", None) is None:
+            raise HTTPException(503, "changing Max from the phone is turned off (dev.enabled in config.yaml)")
+        return rt.ctx.dev
+
+    @app.post("/api/dev/request")
+    def dev_request(body: DevRequest):
+        try:
+            job = dev().submit(body.text)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc))
+        return {"id": job.id, "status": job.status}
+
+    @app.get("/api/dev/jobs")
+    def dev_jobs():
+        return dev().list()
+
+    @app.post("/api/dev/jobs/{job_id}/{action}")
+    def dev_decide(job_id: int, action: str):
+        if action not in ("approve", "reject"):
+            raise HTTPException(404, "approve or reject")
+        try:
+            job = dev().approve(job_id) if action == "approve" else dev().reject(job_id)
+        except KeyError:
+            raise HTTPException(404, "no such change")
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        return {"id": job.id, "status": job.status}
+
+    @app.get("/api/app/info")
+    def app_info():
+        from .devloop import apk_info
+
+        return apk_info()
+
+    @app.get("/api/app/apk")
+    def app_apk():
+        from fastapi.responses import FileResponse
+
+        from .devloop import APK
+
+        if not APK.exists():
+            raise HTTPException(404, "no phone app build yet")
+        return FileResponse(APK, media_type="application/vnd.android.package-archive", filename="max.apk")
 
     # ----- notes from course documents -----
     def docs_mgr():

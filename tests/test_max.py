@@ -2269,3 +2269,51 @@ def test_api_adds_a_document_and_writes_its_notes(tmp_path):
     note = client.get(f"/api/notes/{ctx.memory.notes()[0]['id']}").json()
     assert note["kind"] == "document" and "Ontologies" in note["transcript_md"] and "Homework 2" in note["notes_md"]
     assert client.post("/api/documents/summarize", json={"paths": [files[0]["path"]]}).json()["skipped"] == ["Week 2.txt"]
+
+
+# ---------- change Max from the phone (devloop.py) ----------
+
+def test_dev_requests_one_at_a_time_and_need_a_decision(tmp_path, monkeypatch):
+    from max_assistant import devloop
+
+    monkeypatch.setattr(devloop, "JOBS_FILE", tmp_path / "jobs.json")
+    monkeypatch.setattr(devloop, "DATA", tmp_path)
+    monkeypatch.setattr(devloop.DevLoop, "_work", lambda self, job: None)     # no git, no Claude
+    loop = devloop.DevLoop()
+    with pytest.raises(ValueError):
+        loop.submit("hi")
+    job = loop.submit("make the orb purple")
+    assert job.branch.startswith("phone/1-") and loop.busy is job
+    with pytest.raises(RuntimeError, match="still working"):
+        loop.submit("another change")
+    job.status = "ready"
+    with pytest.raises(RuntimeError, match="Approve or reject"):
+        loop.submit("another change")
+    job.status = "working"
+    assert devloop.DevLoop().get(1).status == "failed"            # Max restarted mid-job: never left hanging
+    assert devloop.describe_tool("Edit", {"file_path": "C:/x/max_assistant/agent.py"}) == "Editing agent.py"
+    assert devloop.describe_tool("Bash", {"command": ".venv/Scripts/python -m pytest -q"}) == "Running the tests"
+
+
+def test_dev_api_and_app_update(tmp_path, monkeypatch):
+    from max_assistant import devloop
+
+    client, rt = api_client()
+    assert client.get("/api/dev/jobs").status_code == 503                 # off unless dev.enabled
+    monkeypatch.setattr(devloop, "JOBS_FILE", tmp_path / "jobs.json")
+    monkeypatch.setattr(devloop, "DATA", tmp_path)
+    monkeypatch.setattr(devloop, "APK", tmp_path / "app" / "max.apk")
+    monkeypatch.setattr(devloop.DevLoop, "_work", lambda self, job: None)
+    rt.ctx.dev = devloop.DevLoop()
+    assert client.post("/api/dev/request", json={"text": "add a dark mode toggle"}).json()["id"] == 1
+    assert client.post("/api/dev/request", json={"text": "another"}).status_code == 409
+    assert client.get("/api/dev/jobs").json()[0]["request"] == "add a dark mode toggle"
+    assert client.post("/api/dev/jobs/1/approve").status_code == 409          # not finished yet
+    assert client.post("/api/dev/jobs/1/explode").status_code == 404
+    assert client.post("/api/dev/jobs/1/reject").json()["status"] == "rejected"
+    assert client.get("/api/app/info").json() == {"available": False}
+    assert client.get("/api/app/apk").status_code == 404
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "max.apk").write_bytes(b"PK fake apk")
+    assert client.get("/api/app/info").json()["size"] == 11
+    assert client.get("/api/app/apk").content == b"PK fake apk"

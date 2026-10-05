@@ -91,6 +91,19 @@ class MaxApi(private val base: String, private val token: String) {
     suspend fun notesStart(kind: String) = post("/api/notes/start", JSONObject().put("kind", kind))
     suspend fun notesStop() = post("/api/notes/stop")
 
+    /** Change Max from the phone (Claude Code on the laptop) and install the app it builds. */
+    suspend fun devRequest(text: String) = JSONObject(post("/api/dev/request", JSONObject().put("text", text)))
+    suspend fun devJobs() = JSONArray(get("/api/dev/jobs"))
+    suspend fun devDecide(id: Int, action: String) = JSONObject(post("/api/dev/jobs/$id/$action"))
+    suspend fun appInfo() = JSONObject(get("/api/app/info"))
+    suspend fun download(path: String, to: java.io.File) = withContext(Dispatchers.IO) {
+        http.newCall(request(path).get().build()).execute().use { res ->
+            if (!res.isSuccessful) throw ApiError(res.code, "HTTP ${res.code}")
+            to.outputStream().use { out -> res.body!!.byteStream().copyTo(out) }
+        }
+        to
+    }
+
     /** Course documents: list (with which have notes), write notes, add a file from the phone. */
     suspend fun documents() = JSONObject(get("/api/documents"))
     suspend fun summarizeDocs(paths: List<String>, redo: Boolean = false) =

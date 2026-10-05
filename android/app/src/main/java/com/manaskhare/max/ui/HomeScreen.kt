@@ -3,6 +3,9 @@ package com.manaskhare.max.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +44,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
@@ -51,6 +56,7 @@ import com.manaskhare.max.MainViewModel
 import com.manaskhare.max.Phase
 import com.manaskhare.max.Turn
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(vm: MainViewModel, askMic: (() -> Unit) -> Unit) {
     val phase by vm.phase.collectAsState()
@@ -63,13 +69,17 @@ fun HomeScreen(vm: MainViewModel, askMic: (() -> Unit) -> Unit) {
     val words = look.piece == Centrepiece.WORDS
     var typing by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf("") }
+    val keyboardOpen = WindowInsets.isImeVisible
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(typing) { if (typing) focus.requestFocus() }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 26.dp, end = 26.dp, top = 22.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Max", style = DisplayStyle, color = Text1, fontSize = 32.sp, modifier = Modifier.weight(1f))
             LinkChip(link)
         }
-        if (!words) Centrepiece(phase, level, Modifier.fillMaxWidth().height(320.dp))
+        // The orb makes way while typing, so the reply and the text box both fit above the keyboard
+        if (!words && !keyboardOpen) Centrepiece(phase, level, Modifier.fillMaxWidth().height(320.dp))
 
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 26.dp),
@@ -103,7 +113,7 @@ fun HomeScreen(vm: MainViewModel, askMic: (() -> Unit) -> Unit) {
         if (typing) {
             Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
-                    value = text, onValueChange = { text = it }, modifier = Modifier.weight(1f),
+                    value = text, onValueChange = { text = it }, modifier = Modifier.weight(1f).focusRequester(focus),
                     placeholder = { Text("Type to Max…", color = Dim) }, singleLine = true, shape = RoundedCornerShape(14.dp),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { vm.send(text); text = ""; typing = false }),

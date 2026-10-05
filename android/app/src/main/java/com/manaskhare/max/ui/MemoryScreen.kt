@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -117,32 +118,34 @@ private fun Notes(vm: MainViewModel, open: (JSONObject) -> Unit) {
     }
 
     val s = status
-    Card {
-        when {
-            s?.optBoolean("active") == true -> {
-                Label("● recording ${s.str("kind")}", color = Red)
-                Text("${s.optInt("elapsed_s") / 60} min · ${s.optInt("words")} words", color = Text1)
-                if (s.str("last").isNotBlank()) Text("“…${s.str("last")}”", color = Text2, fontSize = 13.sp)
-                Spacer(Modifier.height(8.dp))
-                GhostButton("Stop & write notes", color = Red) { vm.call({ it.notesStop() }) { rev++ } }
-            }
-            s?.optBoolean("finishing") == true -> Text("✍ Writing up the notes…", color = Text1)
-            else -> {
-                Label("record on the laptop")
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    GhostButton("● Lecture", Modifier.weight(1f)) { vm.call({ it.notesStart("lecture") }) }
-                    GhostButton("● Meeting", Modifier.weight(1f)) { vm.call({ it.notesStart("meeting") }) }
+    // One scrolling list: the record and document cards scroll away so past notes get the screen
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
+        item {
+            Card {
+                when {
+                    s?.optBoolean("active") == true -> {
+                        Label("● recording ${s.str("kind")}", color = Red)
+                        Text("${s.optInt("elapsed_s") / 60} min · ${s.optInt("words")} words", color = Text1)
+                        if (s.str("last").isNotBlank()) Text("“…${s.str("last")}”", color = Text2, fontSize = 13.sp)
+                        Spacer(Modifier.height(8.dp))
+                        GhostButton("Stop & write notes", color = Red) { vm.call({ it.notesStop() }) { rev++ } }
+                    }
+                    s?.optBoolean("finishing") == true -> Text("✍ Writing up the notes…", color = Text1)
+                    else -> {
+                        Label("record on the laptop")
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            GhostButton("● Lecture", Modifier.weight(1f)) { vm.call({ it.notesStart("lecture") }) }
+                            GhostButton("● Meeting", Modifier.weight(1f)) { vm.call({ it.notesStart("meeting") }) }
+                        }
+                        Text("Lecture listens through the laptop mic; meeting records the laptop's audio too.",
+                             color = Text2, fontSize = 12.5.sp, modifier = Modifier.padding(top = 8.dp))
+                    }
                 }
-                Text("Lecture listens through the laptop mic; meeting records the laptop's audio too.",
-                     color = Text2, fontSize = 12.5.sp, modifier = Modifier.padding(top = 8.dp))
             }
         }
-    }
-    Spacer(Modifier.height(10.dp))
-    Documents(vm) { rev++ }
-    Spacer(Modifier.height(10.dp))
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { Documents(vm) { rev++ } }
+        if (items.isNotEmpty()) item { Label("saved notes", modifier = Modifier.padding(start = 4.dp, top = 6.dp)) }
         items(items, key = { it.optInt("id") }) { n ->
             Card(Modifier.clickable { vm.call({ it.note(n.optInt("id")) }, open) }) {
                 Text(n.str("title"), color = Text1, fontWeight = FontWeight.SemiBold)

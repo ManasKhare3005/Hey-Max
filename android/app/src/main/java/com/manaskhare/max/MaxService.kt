@@ -162,6 +162,11 @@ class MaxService : Service() {
                 "saved" -> notify(MaxApp.CH_UPDATE, "Notes ready", data.optString("title"))
                 "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
             }
+            "devjob" -> when (data.optString("status")) {
+                "ready" -> notify(MaxApp.CH_UPDATE, "Change ready for your OK", data.optString("request"))
+                "failed" -> notify(MaxApp.CH_UPDATE, "Change failed", data.optString("request"))
+                "merged" -> notify(MaxApp.CH_UPDATE, "Change applied", data.optString("request"))
+            }
             "docnotes" -> when (data.optString("action")) {
                 "done" -> if (data.optInt("done") > 0)
                     notify(MaxApp.CH_UPDATE, "Document notes ready", "${data.optInt("done")} file(s) · open Notes")

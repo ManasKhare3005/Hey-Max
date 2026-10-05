@@ -162,6 +162,11 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
             }
         }
 
+        if (paired) {
+            item { ChangeMaxSection(vm) }
+            item { UpdateSection(vm) }
+        }
+
         item {
             Section("Look & sound") {
                 SettingRow("Appearance", Icons.Filled.Palette,
