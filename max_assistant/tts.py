@@ -55,6 +55,18 @@ class PiperTTS:
         return data.astype(np.float32) / 32768.0, sr
 
 
+def loudness_envelope(audio: np.ndarray, sr: int, rate: int = 60) -> list[float]:
+    """How loud the voice is, `rate` times a second, 0-1 (the avatar's mouth follows it)."""
+    hop = max(1, sr // rate)
+    n = len(audio) // hop
+    if n == 0:
+        return []
+    frames = np.asarray(audio[: n * hop], dtype=np.float32).reshape(n, hop)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    peak = float(np.percentile(rms, 95)) or 1.0
+    return [round(float(v), 2) for v in np.clip(rms / peak, 0, 1)]
+
+
 def trim_silence(audio: np.ndarray, sr: int, threshold: float = 0.01, keep_s: float = 0.06) -> np.ndarray:
     """Cut the silence some voices pad around every sentence (gaps between streamed sentences)."""
     loud = np.flatnonzero(np.abs(audio) > threshold)
@@ -175,6 +187,17 @@ class Speaker:
             self.sapi = SapiTTS(speed)
 
     interrupts = None   # wakeword.InterruptSpotter: lets "stop" / "Hey Max" cut Max off
+    on_speech = None    # (action, data): "start" with the loudness envelope just before playing, then "end"
+
+    def _tell(self, action: str, data: dict):
+        if self.on_speech is not None:
+            try:
+                self.on_speech(action, data)
+            except Exception as exc:                   # the avatar must never break speech
+                log.debug("on_speech failed: %s", exc)
+
+    def _starting(self, audio, sr: int):
+        self._tell("start", {"env": loudness_envelope(audio, sr), "rate": 60, "duration": round(len(audio) / sr, 2)})
 
     def say(self, text: str) -> str | None:
         """Speak `text`. Returns "stop" or "wake" if the user interrupted, else None."""
@@ -190,10 +213,13 @@ class Speaker:
                 from .audio import play
 
                 audio, sr = self.piper.synthesize(text)
+                self._starting(audio, sr)
                 play(audio, sr, self.device)
             else:
+                self._tell("start", {"env": [], "rate": 60, "duration": 0})     # no audio to measure: a generic mouth
                 self.sapi.say(text)
         finally:
+            self._tell("end", {"cut": False})
             if self.mic:
                 self.mic.flush()
                 self.mic.muted.clear()
@@ -208,6 +234,7 @@ class Speaker:
         audio, sr = self.piper.synthesize(text)
         self.mic.flush()
         self.interrupts.reset()
+        self._starting(audio, sr)
         sd.play(audio, sr, device=self.device)
         try:
             heard = watch_for_interrupt(self.mic.read, self.interrupts, len(audio) / sr + 0.15, text)
@@ -216,5 +243,6 @@ class Speaker:
                 sd.stop()
             else:
                 sd.wait()
+            self._tell("end", {"cut": bool(heard)})
             self.mic.flush()
         return heard

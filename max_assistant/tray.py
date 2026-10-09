@@ -28,12 +28,14 @@ def _icon_image(paused: bool = False):
 
 
 class Tray:
-    def __init__(self, name: str, dashboard_url: str, free_gpu: Callable[[], None], controls=None):
+    def __init__(self, name: str, dashboard_url: str, free_gpu: Callable[[], None], controls=None,
+                 toggle_avatar: Callable[[], None] | None = None):
         from .events import Controls
 
         self.name = name
         self.url = dashboard_url
         self.free_gpu = free_gpu
+        self.toggle_avatar = toggle_avatar
         self.controls = controls or Controls()
         self.paused = self.controls.paused          # shared with the overlay and the API
         self.quit = self.controls.quit
@@ -51,6 +53,7 @@ class Tray:
             item("Open in browser", lambda: webbrowser.open(self.url)),
             item(lambda _: "Resume listening" if self.paused.is_set() else "Pause listening", self._toggle),
             item("Sleep models (free GPU)", lambda: self._safe(self.free_gpu)),
+            *([item("Show / hide avatar", lambda: self._safe(self.toggle_avatar))] if self.toggle_avatar else []),
             pystray.Menu.SEPARATOR,
             item(f"Quit {self.name}", self._quit),
         )

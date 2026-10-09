@@ -57,11 +57,14 @@ class Moonshine:
 
 class SpeechToText:
     def __init__(self, model: str = "small.en", device: str = "cpu", compute_type: str = "int8",
-                 fast_model_dir: str | None = None, fast_min_snr_db: float = 12.0, prompt: str | None = None):
+                 fast_model_dir: str | None = None, fast_min_snr_db: float = 12.0, prompt: str | None = None,
+                 cpu_threads: int = 0):
         from faster_whisper import WhisperModel
 
         log.info("loading whisper %s on %s (%s)", model, device, compute_type)
-        self.model = WhisperModel(model, device=device, compute_type=compute_type)
+        # cpu_threads 0 = CTranslate2's default (4). 6 measured best with the avatar running (it sits on
+        # the E-cores): 4 threads let the avatar's work land on Whisper's cores (+32% time), 6 was +3%
+        self.model = WhisperModel(model, device=device, compute_type=compute_type, cpu_threads=cpu_threads)
         self.fast = None
         self.fast_min_snr_db = fast_min_snr_db
         # A hint about the vocabulary to expect (commands, app/site names). Measured: word

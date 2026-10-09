@@ -24,7 +24,7 @@ class EventBus:
     def publish(self, kind: str, data: dict | None = None):
         event = {"id": next(self._ids), "ts": time.time(), "kind": kind, "data": data or {}}
         with self._lock:
-            if kind in ("stage", "level", "heartbeat", "status"):
+            if kind in ("stage", "level", "heartbeat", "status", "gpu"):
                 self.state[kind] = event["data"]
             if kind != "level":                           # mic levels are too chatty to keep
                 self.recent.append(event)

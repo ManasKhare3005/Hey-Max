@@ -1,8 +1,12 @@
 /**
- * Max's avatar, phase A (spike): load a VRM, give it a little idle life and measure what it costs.
- * No connection to Max yet. URL options:
- *   ?fps=0       frame-rate cap; 0 = every screen refresh (smoothest; a cap that doesn't divide the
- *                refresh rate, e.g. 60 on a 144 Hz screen, makes motion judder)
+ * Max's avatar: a VRM character that follows Max over the dashboard WebSocket (see behaviour.ts
+ * for what it does in each state and link.ts for the connection). URL options (the desktop window,
+ * max_assistant/avatar, fills them in from config.yaml):
+ *   ?fps=90      frame-rate cap; 0 = every screen refresh (a cap that doesn't divide the refresh
+ *                rate, e.g. 60 on a 144 Hz screen, makes motion judder)
+ *   ?asleep_fps=30 / ?busy_fps=30   while the models sleep / while Whisper transcribes
+ *   ?ws=...      Max's event WebSocket;  ?lipsync_ms=80  mouth delay vs the event
+ *   ?standalone=1  don't close when Max is gone
  *   ?frame=upper upper body (default) or full
  *   ?tex=1024    shrink textures larger than this (0 = keep the originals)
  *   ?scale=2     render at this many pixels per screen pixel (supersampling: cleaner hair and edges)
@@ -15,9 +19,16 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRM, VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+import { Behaviour, modeOf } from "./behaviour";
+import { connect } from "./link";
 
 const params = new URLSearchParams(location.search);
-const FPS = Number(params.get("fps") ?? 0);
+const FPS = Number(params.get("fps") ?? 90);
+const ASLEEP_FPS = Number(params.get("asleep_fps") ?? 30);
+const BUSY_FPS = Number(params.get("busy_fps") ?? 30);
+const WS = params.get("ws") || "ws://127.0.0.1:8765/api/ws";
+const LIPSYNC_MS = Number(params.get("lipsync_ms") ?? 80);
+const STANDALONE = params.get("standalone") === "1";
 const FRAME = params.get("frame") || "upper";
 const SNAPSHOT = params.get("snapshot") === "1";
 const TEX = Number(params.get("tex") || 0);
@@ -63,6 +74,20 @@ window.addEventListener("resize", () => {
 
 // ----- the model -----
 let vrm: VRM | null = null;
+let behaviour: Behaviour | null = null;
+
+type Api = { report?: (x: unknown) => void; snapshot?: (x: string, mode?: string) => void; toggle?: () => void; close?: () => void };
+const api = (): Api | undefined => (window as unknown as { pywebview?: { api?: Api } }).pywebview?.api;
+
+const link = connect(WS, LIPSYNC_MS, {
+  onWake: () => behaviour?.wake(),
+  onToggle: () => api()?.toggle?.(),
+  onOfflineLong: () => { if (!STANDALONE) api()?.close?.(); },
+});
+
+// Hidden (tray toggle, or a fullscreen game in front): stop drawing entirely
+let hidden = false;
+(window as unknown as { maxAvatar: unknown }).maxAvatar = { setHidden: (h: boolean) => { hidden = h; } };
 const loadStart = performance.now();
 let loadMs = 0;
 
@@ -80,6 +105,7 @@ loader.load(MODEL, (gltf) => {
   frameModel(v);
   scene.add(v.scene);
   vrm = v;
+  behaviour = new Behaviour(v, camera, scene);
   loadMs = performance.now() - loadStart;
 }, undefined, (err) => { stats.textContent = `couldn't load ${MODEL}: ${err}`; document.body.classList.add("debug"); });
 
@@ -133,30 +159,17 @@ function restPose(v: VRM) {
   h.getNormalizedBoneNode("rightLowerArm")?.rotation.set(0, 0.25, -0.1);
 }
 
-// ----- idle life: blink, breathe, a slow sway of the head -----
-let nextBlink = 1.5;
-let blinkT = -1;
-function idle(v: VRM, t: number, dt: number) {
-  const h = v.humanoid;
-  const breath = Math.sin(t * 1.6);
-  h.getNormalizedBoneNode("chest")?.rotation.set(breath * 0.012, 0, 0);
-  h.getNormalizedBoneNode("spine")?.rotation.set(breath * 0.008, Math.sin(t * 0.31) * 0.02, 0);
-  h.getNormalizedBoneNode("neck")?.rotation.set(Math.sin(t * 0.43) * 0.03, Math.sin(t * 0.27) * 0.06, Math.sin(t * 0.37) * 0.02);
-  nextBlink -= dt;
-  if (nextBlink <= 0 && blinkT < 0) { blinkT = 0; nextBlink = 2.5 + Math.random() * 4; }
-  let blink = 0;
-  if (blinkT >= 0) {
-    blinkT += dt;
-    blink = blinkT < 0.07 ? blinkT / 0.07 : Math.max(0, 1 - (blinkT - 0.07) / 0.1);
-    if (blinkT > 0.17) blinkT = -1;
-  }
-  v.expressionManager?.setValue("blink", blink);
-}
-
 // ----- loop with a frame cap -----
 const clock = new THREE.Clock();
-const minGap = FPS > 0 ? 1000 / FPS : 0;
 let last = 0;
+let cap = FPS;
+
+/** The frame cap right now: lower while the models sleep or Whisper needs the CPU. */
+function currentCap(): number {
+  if (modeOf(link) === "asleep") return ASLEEP_FPS;
+  if (link.sttBusy) return BUSY_FPS;
+  return FPS;
+}
 let frames = 0;
 let fps = 0;
 let fpsAt = performance.now();
@@ -165,16 +178,18 @@ let statFrames = 0;
 
 function frame(now: number) {
   requestAnimationFrame(frame);
-  if (document.hidden || (minGap && now - last < minGap - 1)) return;   // skip: over the cap or not visible
+  cap = currentCap();
+  const minGap = cap > 0 ? 1000 / cap : 0;
+  if (hidden || document.hidden || (minGap && now - last < minGap - 1)) return;   // over the cap / hidden
   last = now;
   const t0 = performance.now();
   const dt = Math.min(clock.getDelta(), 0.1);
-  if (vrm) {
-    idle(vrm, clock.elapsedTime, dt);
+  if (vrm && behaviour) {
+    behaviour.update(modeOf(link), link, dt);
     vrm.update(dt);                                              // expressions, look-at, spring bones (hair)
   }
   renderer.render(scene, camera);
-  if (SNAPSHOT && vrm && clock.elapsedTime > 3 && !snapped) snap();
+  if (SNAPSHOT && vrm && clock.elapsedTime > 3) snapOnModeChange();
   frameMsSum += performance.now() - t0;
   statFrames++;
   frames++;
@@ -186,12 +201,17 @@ function frame(now: number) {
 }
 requestAnimationFrame(frame);
 
-let snapped = false;
-function snap() {
-  const api = (window as unknown as { pywebview?: { api?: { snapshot?: (x: string) => void } } }).pywebview?.api;
-  if (!api?.snapshot) return;
-  snapped = true;
-  api.snapshot(renderer.domElement.toDataURL("image/png"));       // right after render: the buffer is still there
+// ?snapshot=1: one picture of the canvas per mode, once the pose has settled (for checks)
+const snapped = new Set<string>();
+let modeSince = { mode: "", at: 0 };
+function snapOnModeChange() {
+  const mode = modeOf(link);
+  if (mode !== modeSince.mode) modeSince = { mode, at: performance.now() };
+  const settle = mode === "speaking" ? 400 : mode === "asleep" ? 2500 : 1200;
+  const a = api();
+  if (!a?.snapshot || snapped.has(mode) || performance.now() - modeSince.at < settle) return;
+  snapped.add(mode);
+  a.snapshot(renderer.domElement.toDataURL("image/png"), mode);  // right after render: the buffer is still there
 }
 
 // ----- stats -----
@@ -207,8 +227,11 @@ let reported = 0;
 setInterval(() => {
   const info = renderer.info;
   const s = {
-    fps: Math.round(fps * 10) / 10,
-    cap: FPS,
+    fps: hidden ? 0 : Math.round(fps * 10) / 10,
+    hidden,
+    cap,
+    mode: modeOf(link),
+    online: link.online,
     cpu_ms_per_frame: Math.round((frameMsSum / Math.max(1, statFrames)) * 100) / 100,
     draw_calls: info.render.calls,
     triangles: info.render.triangles,
@@ -222,10 +245,10 @@ setInterval(() => {
   };
   frameMsSum = 0;
   statFrames = 0;
-  stats.textContent = `fps ${s.fps}/${s.cap || "refresh"}  ${s.cpu_ms_per_frame} ms cpu\ncalls ${s.draw_calls}  tris ${s.triangles}\ntex ${s.textures} (limit ${TEX || "none"})\n${gpu}`;
-  const api = (window as unknown as { pywebview?: { api?: { report?: (x: unknown) => void } } }).pywebview?.api;
-  if (api?.report && performance.now() - reported > 1900) {
+  stats.textContent = `fps ${s.fps}/${s.cap || "refresh"}  ${s.cpu_ms_per_frame} ms cpu  ${s.mode}${s.online ? "" : " (offline)"}\ncalls ${s.draw_calls}  tris ${s.triangles}\ntex ${s.textures} (limit ${TEX || "none"})\n${gpu}`;
+  const a = api();
+  if (a?.report && performance.now() - reported > 1900) {
     reported = performance.now();
-    api.report(s);
+    a.report(s);
   }
 }, 500);

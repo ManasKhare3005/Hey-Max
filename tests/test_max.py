@@ -2402,3 +2402,63 @@ def test_dev_api_and_app_update(tmp_path, monkeypatch):
     (tmp_path / "app" / "max.apk").write_bytes(b"PK fake apk")
     assert client.get("/api/app/info").json()["size"] == 11
     assert client.get("/api/app/apk").content == b"PK fake apk"
+
+
+# ---------- avatar (max_assistant/avatar, tts envelope, events) ----------
+
+def test_speech_loudness_envelope_follows_the_voice():
+    from max_assistant.tts import loudness_envelope
+
+    sr = 16000
+    t = np.arange(sr) / sr
+    voice = np.concatenate([0.5 * np.sin(2 * np.pi * 220 * t), np.zeros(sr // 2)]).astype(np.float32)
+    env = loudness_envelope(voice, sr)
+    assert len(env) == 90                                      # 1.5 s at 60 values a second
+    assert min(env[:59]) > 0.9 and max(env[61:]) == 0          # loud while talking, shut in the pause
+    assert loudness_envelope(np.zeros(10, np.float32), sr) == []
+
+
+def test_speaker_tells_the_avatar_before_and_after_each_sentence(monkeypatch):
+    from max_assistant import audio
+    from max_assistant.tts import Speaker
+
+    class Voice:
+        def synthesize(self, text):
+            return np.full(16000, 0.3, np.float32), 16000
+
+    played, told = [], []
+    monkeypatch.setattr(audio, "play", lambda a, sr, device=None: played.append((len(told), len(a))))
+    s = Speaker.__new__(Speaker)
+    s.piper, s.sapi, s.mic, s.device = Voice(), None, None, None
+    s.on_speech = lambda action, data: told.append((action, data))
+    s.say("Hello there.")
+    assert [a for a, _ in told] == ["start", "end"]
+    assert played == [(1, 16000)]                              # the envelope went out before the audio
+    assert told[0][1]["rate"] == 60 and len(told[0][1]["env"]) == 60 and told[0][1]["duration"] == 1.0
+    s.on_speech = lambda action, data: 1 / 0                   # a broken listener never stops speech
+    s.say("Still talking.")
+
+
+def test_models_asleep_is_published_once_per_change():
+    from max_assistant.events import EventBus
+
+    ctx = Context(load_config(), FakeLLM([]))
+    ctx.bus = bus = EventBus()
+    ctx.models_asleep = True
+    ctx.models_asleep = True
+    ctx.models_asleep = False
+    assert [e["data"] for e in bus.recent if e["kind"] == "gpu"] == [{"asleep": True}, {"asleep": False}]
+    assert bus.state["gpu"] == {"asleep": False}               # sent to the avatar when it connects
+
+
+def test_avatar_hides_for_fullscreen_games_only():
+    from max_assistant.avatar import should_hide
+
+    assert should_hide(True, False, "")                        # exclusive fullscreen Direct3D
+    assert should_hide(False, True, r"C:\Riot Games\VALORANT\live\VALORANT.exe")
+    assert should_hide(False, True, r"D:\SteamLibrary\steamapps\common\Elden Ring\eldenring.exe")
+    assert not should_hide(False, True, r"C:\Program Files\Google\Chrome\Application\chrome.exe")   # maximised / video
+    assert not should_hide(False, True, r"C:\Windows\explorer.exe")
+    assert not should_hide(False, False, r"C:\Riot Games\VALORANT\live\VALORANT.exe")              # windowed
+    assert not should_hide(False, True, r"C:\Tools\SomeApp.exe")
+    assert should_hide(False, True, r"C:\Tools\MyGame.exe", extra_games=["mygame.exe"])

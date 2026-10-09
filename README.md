@@ -207,21 +207,16 @@ It uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) open-vocabulary key
 - **Slow first answer** — the model is loading into VRAM; later answers are faster. Close GPU-heavy apps (games, NVIDIA overlay) to help.
 - Logs are in `logs/max.log`.
 
-## Planned: 3D avatar (not built yet)
+## Avatar
 
-*Status: phase A (spike + measurements) done; not connected to Max yet.* The goal is for Max to feel like a person living on the laptop: a character on the desktop that reacts to what Max is doing.
+Max as a 3D character in the bottom-right corner, above the clock, always on top. It starts with Max (`avatar.enabled` in `config.yaml`); the tray has **Show / hide avatar**.
 
-**Direction being considered**
-- A VRM character made in VRoid Studio, rendered with three.js + `@pixiv/three-vrm`.
-- Shown in a transparent, frameless, always-on-top desktop window, or inside the dashboard.
-- It follows Max's state, which is already broadcast on the dashboard WebSocket: idle, listening, thinking, speaking.
-- Lip sync from Max's voice: loudness-based first, phoneme/viseme-based later (Rhubarb, or Piper's phoneme timing).
-- Idle life: blinking, breathing, small head movements, and a glance toward you when the wake word fires.
-
-**Hard constraints**
-- The laptop is an RTX 3050 with 4 GB of VRAM, mostly used by `qwen3:4b`, and 16 GB of RAM. The avatar has to be light: low-poly, capped frame rate, and on the Intel iGPU if possible.
-- It hides or freezes when "go to sleep" / `free_gpu` runs, so it doesn't affect gaming.
-- It must add no delay to the voice loop.
+- **Follows Max:** idle (breathing, glances), looks at you when you say "Hey Max", leans in while listening, eyes up while thinking, lip-syncs to Max's voice, eyes half-closed when paused, dozes off when the models sleep ("go to sleep") or Max is offline.
+- **Lip sync:** just before each sentence plays, Max sends its loudness curve (60 values a second) over the dashboard WebSocket; the mouth follows it (`avatar.lip_sync_delay_ms` if it's early or late).
+- **Hides for fullscreen games** (exclusive fullscreen, or borderless from Steam / Riot / Epic... folders, or `avatar.games`), not for maximised Chrome or videos.
+- **Character:** the "Max edition" of VRoid's CC0 HairSample_Male (navy hoodie, cyan trim, glowing orb, cyan eyes), rebuilt with `python -m max_assistant.avatar.edition`. Any VRM works (`avatar.model`).
+- **Cost:** renders on the Intel iGPU (0 MB of the 3050's VRAM), 90 fps (even pacing on the 180 Hz screen), 30 fps while asleep and while Whisper transcribes; it and its browser processes stay on the CPU's efficiency cores and Whisper uses 6 threads. Measured: Whisper 2.09 s with the avatar vs 2.19 s without.
+- Code: `dashboard/avatar.html` + `src/avatar/` (three.js + @pixiv/three-vrm; `behaviour.ts` = what it does per state, `link.ts` = connection), `max_assistant/avatar/` (window, pinning, fullscreen check, `bench.py`).
 
 **Phase A results** (VRoid AvatarSample_C, ~27k triangles, 300×460 window, `python -m max_assistant.avatar [--fps 60] [--tex 1024] [--debug]`, measured with `python -m max_assistant.avatar.bench`)
 

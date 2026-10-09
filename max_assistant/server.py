@@ -170,7 +170,7 @@ def create_app(rt: Runtime) -> FastAPI:
             from .stt import SpeechToText
 
             ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
-                                   prompt=cfg.stt.get("prompt"))
+                                   prompt=cfg.stt.get("prompt"), cpu_threads=cfg.stt.get("cpu_threads", 0))
         return ctx.stt
 
     @app.post("/api/voice")

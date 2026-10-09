@@ -81,7 +81,7 @@ class Context:
         self.cfg = cfg
         self.llm = llm
         self.last_files: list[str] = []
-        self.models_asleep = False
+        self._models_asleep = False
         self.web = None   # WebSearch, set by tools.web
         self.browser = None   # BrowserSession, set by tools.browser
         self.memory = None    # MemoryStore (facts, conversation log, actions)
@@ -96,6 +96,18 @@ class Context:
         self.docnotes = None   # docnotes.DocNotes: study notes written from course files
         self.dev = None        # devloop.DevLoop: changes to Max requested from the phone, made by Claude Code
         self.mail = None       # mail.GmailClient: the user's Gmail (app password in secrets.yaml)
+
+    @property
+    def models_asleep(self) -> bool:
+        return self._models_asleep
+
+    @models_asleep.setter
+    def models_asleep(self, value: bool):
+        """Models unloaded ("go to sleep") or back. Published so the avatar can doze off / wake up."""
+        changed = bool(value) != self._models_asleep
+        self._models_asleep = bool(value)
+        if changed and getattr(self, "bus", None) is not None:
+            self.bus.publish("gpu", {"asleep": self._models_asleep})
 
 
 def setup_logging(cfg, verbose: bool):
@@ -156,7 +168,7 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
                 from .stt import SpeechToText
 
                 ctx.stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
-                                       prompt=cfg.stt.get("prompt"))
+                                       prompt=cfg.stt.get("prompt"), cpu_threads=cfg.stt.get("cpu_threads", 0))
             return ctx.stt.whisper
 
         folder = Path(os.path.expanduser(notes_cfg.get("folder", "~/Documents/Max Notes")))
@@ -530,9 +542,10 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     mic = Microphone(a.sample_rate, a.input_device)
     stt = SpeechToText(cfg.stt.model, cfg.stt.device, cfg.stt.compute_type,
                        cfg.stt.get("fast_model_dir"), cfg.stt.get("fast_min_snr_db", 12.0),
-                       cfg.stt.get("prompt"))
+                       cfg.stt.get("prompt"), cfg.stt.get("cpu_threads", 0))
     speaker = Speaker(cfg.tts.engine, cfg.tts.piper_voice, cfg.tts.speed, a.output_device, mic=mic,
                       natural_voice=cfg.tts.get("natural_voice", "Microsoft Ava Online"))
+    speaker.on_speech = lambda action, data: bus.publish("speech", {"action": action, **data})
     heard_audio = {"last": None}              # the last recording, for voice ID
     voice_check = {"owner": None}             # did the current request sound like the user? (None = unknown)
     voice_id = make_voice_id(cfg)
@@ -581,7 +594,11 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
 
         def transcribe(audio):                 # keep the recording: voice ID checks who said it
             heard_audio["last"] = audio
-            return stt.transcribe(audio)
+            bus.publish("stt", {"busy": True})  # the avatar slows down so Whisper gets the CPU
+            try:
+                return stt.transcribe(audio)
+            finally:
+                bus.publish("stt", {"busy": False})
 
         heard_audio["last"] = None
         text = listen_for_command(mic, noise, transcribe, a.vad_sensitivity, a.silence_s, timeout,
@@ -741,6 +758,9 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
 
         ctx.dev.restart = restart
     start_dashboard(cfg, ctx, bus, approvals, run_command, static_info(cfg, wake.phrase, "voice"), controls)
+    from .avatar import launch_with_max
+
+    launch_with_max(cfg)
     digest = start_digest(ctx, bus)
     alerts = start_alerts(ctx, bus)  # noqa: F841
     start_mail_alerts(ctx, bus)
@@ -757,11 +777,17 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
         def sleep_models():
             for m in (cfg.llm.fast_model, cfg.llm.planner_model):
                 llm.unload(m)
-            ctx.models_asleep = True
+            ctx.models_asleep = True                 # also tells the avatar (event "gpu")
             bus.publish("status", {"models": "asleep"})
 
+        def toggle_avatar():
+            bus.publish("avatar", {"action": "toggle"})     # a running avatar hides / shows itself
+            from .avatar import launch_with_max
+
+            launch_with_max(cfg)                 # not running: this starts it (a second copy just exits)
+
         tray_icon = Tray(cfg.assistant.name, f"http://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}",
-                         sleep_models, controls).start()
+                         sleep_models, controls, toggle_avatar if (cfg.get("avatar", {}) or {}).get("enabled") else None).start()
     say_main(f"{cfg.assistant.name} online.")
 
     try:
