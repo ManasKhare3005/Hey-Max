@@ -10,5 +10,10 @@ export default defineConfig({
       "/api": { target: "http://127.0.0.1:8765", ws: true, changeOrigin: true },
     },
   },
-  build: { outDir: "dist", emptyOutDir: true },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    // The avatar is its own page so three.js never loads with the dashboard
+    rollupOptions: { input: { main: "index.html", avatar: "avatar.html" } },
+  },
 });

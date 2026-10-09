@@ -207,6 +207,36 @@ It uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) open-vocabulary key
 - **Slow first answer** — the model is loading into VRAM; later answers are faster. Close GPU-heavy apps (games, NVIDIA overlay) to help.
 - Logs are in `logs/max.log`.
 
+## Planned: 3D avatar (not built yet)
+
+*Status: phase A (spike + measurements) done; not connected to Max yet.* The goal is for Max to feel like a person living on the laptop: a character on the desktop that reacts to what Max is doing.
+
+**Direction being considered**
+- A VRM character made in VRoid Studio, rendered with three.js + `@pixiv/three-vrm`.
+- Shown in a transparent, frameless, always-on-top desktop window, or inside the dashboard.
+- It follows Max's state, which is already broadcast on the dashboard WebSocket: idle, listening, thinking, speaking.
+- Lip sync from Max's voice: loudness-based first, phoneme/viseme-based later (Rhubarb, or Piper's phoneme timing).
+- Idle life: blinking, breathing, small head movements, and a glance toward you when the wake word fires.
+
+**Hard constraints**
+- The laptop is an RTX 3050 with 4 GB of VRAM, mostly used by `qwen3:4b`, and 16 GB of RAM. The avatar has to be light: low-poly, capped frame rate, and on the Intel iGPU if possible.
+- It hides or freezes when "go to sleep" / `free_gpu` runs, so it doesn't affect gaming.
+- It must add no delay to the voice loop.
+
+**Phase A results** (VRoid AvatarSample_C, ~27k triangles, 300×460 window, `python -m max_assistant.avatar [--fps 60] [--tex 1024] [--debug]`, measured with `python -m max_assistant.avatar.bench`)
+
+| | avatar off | avatar on, 60 fps, iGPU |
+|---|---|---|
+| Renders on | – | Intel UHD (forced via `--force_low_power_gpu`) |
+| NVIDIA memory used by the avatar | – | 0 MB (left to choose itself, it takes 123 MB of the 3050) |
+| iGPU load / shared memory | – | 13% / ~220 MB |
+| Avatar CPU / RAM | – | ~7% of the machine / ~900 MB |
+| `qwen3:4b` speed (still 100% in VRAM) | 49 tok/s | 47 tok/s |
+| Whisper, 9 s clip (default threads) | 2.07 s | 2.74 s (+32%) |
+| Whisper with the fix below | 2.07 s | 2.14 s (+3%, noise level) |
+
+How much the avatar draws barely matters (even at 1 fps Whisper was 25% slower); what matters is CPU cores. The fix: the avatar process is pinned to the i5-12450H's efficiency cores and Whisper uses 6 threads. Texture shrinking made no measurable difference.
+
 ## Project layout
 
 ```

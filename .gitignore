@@ -13,3 +13,4 @@ dashboard/dist/
 secrets.yaml
 docs/User Settings.pdf
 dashboard/*.tsbuildinfo
+dashboard/public/avatar/*.vrm
