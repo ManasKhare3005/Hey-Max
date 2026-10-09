@@ -1,9 +1,12 @@
 /**
  * Max's avatar, phase A (spike): load a VRM, give it a little idle life and measure what it costs.
  * No connection to Max yet. URL options:
- *   ?fps=60      frame-rate cap (frames are skipped, not just throttled by vsync)
+ *   ?fps=0       frame-rate cap; 0 = every screen refresh (smoothest; a cap that doesn't divide the
+ *                refresh rate, e.g. 60 on a 144 Hz screen, makes motion judder)
+ *   ?frame=upper upper body (default) or full
  *   ?tex=1024    shrink textures larger than this (0 = keep the originals)
  *   ?scale=2     render at this many pixels per screen pixel (supersampling: cleaner hair and edges)
+ *   ?snapshot=1  save one rendered frame (just this canvas, not the screen) via the window, for checks
  *   ?debug=1     on-screen stats (fps, draw calls, triangles, GPU name)
  *   ?model=...   VRM to load (default avatar/model.vrm)
  * Every 2 s the stats are also handed to the desktop window (window.pywebview.api.report) so the
@@ -14,7 +17,9 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRM, VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
 const params = new URLSearchParams(location.search);
-const FPS = Number(params.get("fps") || 60);
+const FPS = Number(params.get("fps") ?? 0);
+const FRAME = params.get("frame") || "upper";
+const SNAPSHOT = params.get("snapshot") === "1";
 const TEX = Number(params.get("tex") || 0);
 const DEBUG = params.get("debug") === "1";
 const MODEL = params.get("model") || "avatar/model.vrm";
@@ -30,9 +35,21 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(24, window.innerWidth / window.innerHeight, 0.1, 20);
+const camera = new THREE.PerspectiveCamera(22, window.innerWidth / window.innerHeight, 0.05, 20);
 camera.position.set(0, 1.28, 2.6);
 camera.lookAt(0, 1.18, 0);
+
+/** Point the camera at the model: from the top of the head down to the waist ("upper") or most of it. */
+function frameModel(v: VRM) {
+  v.scene.updateMatrixWorld(true);
+  const head = v.humanoid.getNormalizedBoneNode("head")?.getWorldPosition(new THREE.Vector3());
+  const top = (head?.y ?? 1.45) + 0.28;                           // head bone sits at the base of the skull
+  const span = FRAME === "full" ? top - 0.35 : 0.72;              // metres of the body in view
+  const centre = top - span / 2;
+  const dist = span / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+  camera.position.set(0, centre + 0.05, dist);
+  camera.lookAt(0, centre, 0);
+}
 scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 const sun = new THREE.DirectionalLight(0xffffff, 1.6);
 sun.position.set(0.6, 1.8, 2.2);
@@ -60,6 +77,7 @@ loader.load(MODEL, (gltf) => {
   if (TEX > 0) shrinkTextures(v.scene, TEX);
   sharpenTextures(v.scene);
   restPose(v);
+  frameModel(v);
   scene.add(v.scene);
   vrm = v;
   loadMs = performance.now() - loadStart;
@@ -137,7 +155,7 @@ function idle(v: VRM, t: number, dt: number) {
 
 // ----- loop with a frame cap -----
 const clock = new THREE.Clock();
-const minGap = 1000 / FPS;
+const minGap = FPS > 0 ? 1000 / FPS : 0;
 let last = 0;
 let frames = 0;
 let fps = 0;
@@ -147,7 +165,7 @@ let statFrames = 0;
 
 function frame(now: number) {
   requestAnimationFrame(frame);
-  if (document.hidden || now - last < minGap - 1) return;       // skip: over the cap or not visible
+  if (document.hidden || (minGap && now - last < minGap - 1)) return;   // skip: over the cap or not visible
   last = now;
   const t0 = performance.now();
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -156,6 +174,7 @@ function frame(now: number) {
     vrm.update(dt);                                              // expressions, look-at, spring bones (hair)
   }
   renderer.render(scene, camera);
+  if (SNAPSHOT && vrm && clock.elapsedTime > 3 && !snapped) snap();
   frameMsSum += performance.now() - t0;
   statFrames++;
   frames++;
@@ -166,6 +185,14 @@ function frame(now: number) {
   }
 }
 requestAnimationFrame(frame);
+
+let snapped = false;
+function snap() {
+  const api = (window as unknown as { pywebview?: { api?: { snapshot?: (x: string) => void } } }).pywebview?.api;
+  if (!api?.snapshot) return;
+  snapped = true;
+  api.snapshot(renderer.domElement.toDataURL("image/png"));       // right after render: the buffer is still there
+}
 
 // ----- stats -----
 const stats = document.getElementById("stats")!;
@@ -195,7 +222,7 @@ setInterval(() => {
   };
   frameMsSum = 0;
   statFrames = 0;
-  stats.textContent = `fps ${s.fps}/${s.cap}  ${s.cpu_ms_per_frame} ms cpu\ncalls ${s.draw_calls}  tris ${s.triangles}\ntex ${s.textures} (limit ${TEX || "none"})\n${gpu}`;
+  stats.textContent = `fps ${s.fps}/${s.cap || "refresh"}  ${s.cpu_ms_per_frame} ms cpu\ncalls ${s.draw_calls}  tris ${s.triangles}\ntex ${s.textures} (limit ${TEX || "none"})\n${gpu}`;
   const api = (window as unknown as { pywebview?: { api?: { report?: (x: unknown) => void } } }).pywebview?.api;
   if (api?.report && performance.now() - reported > 1900) {
     reported = performance.now();

@@ -15,13 +15,15 @@ import logging
 import os
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from ..config import ROOT
 
 log = logging.getLogger(__name__)
 PAGE = ROOT / "dashboard" / "dist" / "avatar.html"
 STATS = ROOT / "data" / "avatar-stats.json"
-SIZE = (300, 460)
+SNAPSHOT = ROOT / "data" / "avatar-snapshot.png"
+SIZE = (340, 420)                  # head and upper body
 
 
 class AvatarApi:
@@ -36,6 +38,12 @@ class AvatarApi:
             self._stats_file.write_text(json.dumps(stats), encoding="utf-8")
         except OSError:
             pass
+
+    def snapshot(self, data_url: str):
+        """One rendered frame of the avatar canvas (only the page's own drawing), for framing checks."""
+        import base64
+
+        SNAPSHOT.write_bytes(base64.b64decode(data_url.split(",", 1)[1]))
 
 
 def corner_position(size=SIZE, margin: int = 8) -> tuple[int, int]:
@@ -54,11 +62,14 @@ def corner_position(size=SIZE, margin: int = 8) -> tuple[int, int]:
 
 def main(argv: list[str] | None = None):
     p = argparse.ArgumentParser(prog="max_assistant.avatar")
-    p.add_argument("--fps", type=int, default=60)
+    p.add_argument("--fps", type=int, default=90, help="frame cap; 90 = even pacing on the 180 Hz screen, 0 = every refresh")
+    p.add_argument("--frame", choices=["upper", "full"], default="upper")
     p.add_argument("--tex", type=int, default=0, help="shrink textures above this size (0 = originals)")
     p.add_argument("--scale", type=float, default=2, help="render pixels per screen pixel (2 = supersampled)")
     p.add_argument("--gpu", choices=["low-power", "default"], default="low-power")
     p.add_argument("--debug", action="store_true", help="show fps / GPU stats on the avatar")
+    p.add_argument("--snapshot", action="store_true", help="save one rendered frame to data/avatar-snapshot.png")
+    p.add_argument("--model", default="", help="VRM to show instead of avatar/model.vrm (path under dashboard/dist)")
     args = p.parse_args(argv)
 
     import webview
@@ -75,7 +86,10 @@ def main(argv: list[str] | None = None):
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--force_low_power_gpu"
     STATS.parent.mkdir(parents=True, exist_ok=True)
     STATS.unlink(missing_ok=True)
-    query = f"?fps={args.fps}&tex={args.tex}&scale={args.scale:g}" + ("&debug=1" if args.debug else "")
+    query = (f"?fps={args.fps}&frame={args.frame}&tex={args.tex}&scale={args.scale:g}"
+             + ("&debug=1" if args.debug else "") + ("&snapshot=1" if args.snapshot else "")
+             # encoded: a "/" in the query would confuse pywebview's file server
+             + (f"&model={quote(args.model, safe='')}" if args.model else ""))
     x, y = corner_position()
     webview.create_window(
         "Max avatar", url=str(PAGE) + query, js_api=AvatarApi(STATS), width=SIZE[0], height=SIZE[1], x=x, y=y,
