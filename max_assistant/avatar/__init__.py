@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None):
     p = argparse.ArgumentParser(prog="max_assistant.avatar")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--tex", type=int, default=0, help="shrink textures above this size (0 = originals)")
+    p.add_argument("--scale", type=float, default=2, help="render pixels per screen pixel (2 = supersampled)")
     p.add_argument("--gpu", choices=["low-power", "default"], default="low-power")
     p.add_argument("--debug", action="store_true", help="show fps / GPU stats on the avatar")
     args = p.parse_args(argv)
@@ -74,7 +75,7 @@ def main(argv: list[str] | None = None):
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--force_low_power_gpu"
     STATS.parent.mkdir(parents=True, exist_ok=True)
     STATS.unlink(missing_ok=True)
-    query = f"?fps={args.fps}&tex={args.tex}" + ("&debug=1" if args.debug else "")
+    query = f"?fps={args.fps}&tex={args.tex}&scale={args.scale:g}" + ("&debug=1" if args.debug else "")
     x, y = corner_position()
     webview.create_window(
         "Max avatar", url=str(PAGE) + query, js_api=AvatarApi(STATS), width=SIZE[0], height=SIZE[1], x=x, y=y,

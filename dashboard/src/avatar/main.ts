@@ -3,6 +3,7 @@
  * No connection to Max yet. URL options:
  *   ?fps=60      frame-rate cap (frames are skipped, not just throttled by vsync)
  *   ?tex=1024    shrink textures larger than this (0 = keep the originals)
+ *   ?scale=2     render at this many pixels per screen pixel (supersampling: cleaner hair and edges)
  *   ?debug=1     on-screen stats (fps, draw calls, triangles, GPU name)
  *   ?model=...   VRM to load (default avatar/model.vrm)
  * Every 2 s the stats are also handed to the desktop window (window.pywebview.api.report) so the
@@ -17,12 +18,13 @@ const FPS = Number(params.get("fps") || 60);
 const TEX = Number(params.get("tex") || 0);
 const DEBUG = params.get("debug") === "1";
 const MODEL = params.get("model") || "avatar/model.vrm";
+const SCALE = Number(params.get("scale") || 2);
 if (DEBUG) document.body.classList.add("debug");
 
-// ----- renderer: transparent, low-power GPU preferred, pixel ratio capped -----
+// ----- renderer: transparent, low-power GPU preferred, supersampled (the window is small) -----
 const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
 renderer.setClearColor(0x000000, 0);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setPixelRatio(window.devicePixelRatio * SCALE);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
@@ -56,6 +58,7 @@ loader.load(MODEL, (gltf) => {
   VRMUtils.rotateVRM0(v);                       // VRoid 0.x models face -Z
   v.scene.traverse((o) => { o.frustumCulled = false; });
   if (TEX > 0) shrinkTextures(v.scene, TEX);
+  sharpenTextures(v.scene);
   restPose(v);
   scene.add(v.scene);
   vrm = v;
@@ -81,6 +84,23 @@ function shrinkTextures(root: THREE.Object3D, max: number) {
         c.getContext("2d")!.drawImage(value.image as CanvasImageSource, 0, 0, c.width, c.height);
         value.image = c;
         value.needsUpdate = true;
+      }
+    }
+  });
+}
+
+/** Anisotropic filtering: textures stay sharp on surfaces seen at an angle (hair, neck, clothes). */
+function sharpenTextures(root: THREE.Object3D) {
+  const max = renderer.capabilities.getMaxAnisotropy();
+  root.traverse((o) => {
+    const mats = (o as THREE.Mesh).material;
+    if (!mats) return;
+    for (const m of Array.isArray(mats) ? mats : [mats]) {
+      for (const value of Object.values(m)) {
+        if (value instanceof THREE.Texture && value.anisotropy !== max) {
+          value.anisotropy = max;
+          value.needsUpdate = true;
+        }
       }
     }
   });
