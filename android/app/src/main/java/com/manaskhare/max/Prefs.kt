@@ -25,6 +25,19 @@ class Prefs(context: Context) {
         get() = sp.getLong("lastAlertAt", 0L)
         set(v) = sp.edit().putLong("lastAlertAt", v).apply()
 
+    /** When the phone last synced with the laptop (ms), and the Today page from then (for offline). */
+    var lastSync: Long
+        get() = sp.getLong("lastSync", 0L)
+        set(v) = sp.edit().putLong("lastSync", v).apply()
+
+    var todayJson: String
+        get() = sp.getString("todayJson", "") ?: ""
+        set(v) = sp.edit().putString("todayJson", v).apply()
+
+    var todayAt: Long
+        get() = sp.getLong("todayAt", 0L)
+        set(v) = sp.edit().putLong("todayAt", v).apply()
+
     val paired: Boolean get() = url.isNotBlank() && token.isNotBlank()
 
     fun clear() = sp.edit().remove("url").remove("token").apply()

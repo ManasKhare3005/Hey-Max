@@ -49,6 +49,18 @@ class NewReminder(BaseModel):
     when: str
 
 
+class NewEvent(BaseModel):
+    title: str
+    when: str
+    minutes: int = 60
+    location: str = ""
+
+
+class SyncBody(BaseModel):
+    reminders: list[dict] = []     # the phone's changes since its last sync (see sync.py)
+    events: list[dict] = []
+
+
 class Answer(BaseModel):
     approved: bool
 
@@ -361,7 +373,9 @@ def create_app(rt: Runtime) -> FastAPI:
             "due_today": [item(i) for i in plan.due_today],
             "due_soon": [item(i) for i in plan.due_soon],
             "classes": [item(i) for i in plan.classes],
-            "reminders": [{"id": r.id, "text": r.text, "due": r.due.isoformat()} for r in plan.reminders],
+            "reminders": [{"id": r.id, "uid": r.uid, "text": r.text, "due": r.due.isoformat()} for r in plan.reminders],
+            "events": [{"uid": e.uid, "title": e.title, "start": e.start.isoformat(), "end": e.end.isoformat(),
+                        "all_day": e.all_day, "location": e.location} for e in plan.events],
             "canvas_error": plan.canvas_error,
             "paused": bool(rt.controls and rt.controls.paused.is_set()),
         }
@@ -589,7 +603,7 @@ def create_app(rt: Runtime) -> FastAPI:
     def reminders():
         if rt.ctx.reminders is None:
             return []
-        return [{"id": r.id, "text": r.text, "due": r.due.isoformat()} for r in rt.ctx.reminders.pending()]
+        return [{"id": r.id, "uid": r.uid, "text": r.text, "due": r.due.isoformat()} for r in rt.ctx.reminders.pending()]
 
     @app.post("/api/reminders")
     def add_reminder(body: NewReminder):
@@ -599,14 +613,84 @@ def create_app(rt: Runtime) -> FastAPI:
         if due is None:
             raise HTTPException(400, f"couldn't understand the time '{body.when}'")
         r = rt.ctx.reminders.add(body.text, due)
-        rt.bus.publish("reminder", {"action": "added", "id": r.id, "text": r.text, "due": due.isoformat()})
-        return {"id": r.id, "due": due.isoformat(), "spoken": spoken_time(due)}
+        rt.bus.publish("reminder", {"action": "added", "id": r.id, "uid": r.uid, "text": r.text, "due": due.isoformat()})
+        return {"id": r.id, "uid": r.uid, "due": due.isoformat(), "spoken": spoken_time(due)}
 
     @app.delete("/api/reminders/{reminder_id}")
     def cancel_reminder(reminder_id: int):
         rt.ctx.reminders.set_status(reminder_id, "cancelled")
         rt.bus.publish("reminder", {"action": "cancelled", "id": reminder_id})
         return {"ok": True}
+
+    # ----- events (Max's calendar; the phone shows them in its "Max" calendar) -----
+    def events_store():
+        if rt.ctx.events is None:
+            raise HTTPException(503, "events need memory turned on")
+        return rt.ctx.events
+
+    def event_json(e):
+        return {"uid": e.uid, "title": e.title, "start": e.start.isoformat(), "end": e.end.isoformat(),
+                "all_day": e.all_day, "location": e.location}
+
+    @app.get("/api/events")
+    def events_list(days: int = 14):
+        return [event_json(e) for e in events_store().upcoming(days)]
+
+    @app.post("/api/events")
+    def events_add(body: NewEvent):
+        from .reminders import has_time, parse_when
+
+        start = parse_when(body.when)
+        if start is None:
+            raise HTTPException(400, f"couldn't understand the time '{body.when}'")
+        e = events_store().add(body.title, start, body.minutes, body.location, all_day=not has_time(body.when))
+        rt.bus.publish("event", {"action": "added", **event_json(e)})
+        return {**event_json(e), "spoken": e.spoken()}
+
+    @app.delete("/api/events/{uid}")
+    def events_cancel(uid: str):
+        if not events_store().cancel(uid):
+            raise HTTPException(404, "no such event")
+        rt.bus.publish("event", {"action": "cancelled", "uid": uid})
+        return {"ok": True}
+
+    # ----- phone sync: reminders and events made on the phone while the laptop was away -----
+    @app.post("/api/sync")
+    def sync_with_phone(body: SyncBody):
+        from .sync import sync
+
+        out = sync(rt.ctx, body.model_dump())
+        if body.reminders or body.events:
+            rt.bus.publish("sync", {"reminders": len(body.reminders), "events": len(body.events)})
+        return out
+
+    # ----- lectures / meetings recorded on the phone -----
+    def phone_notes():
+        if rt.ctx.phone_notes is None:
+            raise HTTPException(503, "notes are disabled")
+        return rt.ctx.phone_notes
+
+    @app.post("/api/notes/upload")
+    async def notes_upload(request: Request, uid: str, kind: str = "lecture", title: str = "", started_ms: int = 0):
+        """A recording from the phone (raw audio body). Queued; its notes are written in the background."""
+        from starlette.concurrency import run_in_threadpool
+
+        pn = phone_notes()
+        body = await request.body()
+        try:
+            return await run_in_threadpool(pn.receive, uid, [body], kind, title, started_ms)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/notes/upload/{uid}")
+    def notes_upload_status(uid: str):
+        try:
+            st = phone_notes().state(phone_notes().safe_uid(uid))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if st is None:
+            raise HTTPException(404, "no such recording")
+        return st
 
     # ----- the React app -----
     if (DIST / "index.html").exists():

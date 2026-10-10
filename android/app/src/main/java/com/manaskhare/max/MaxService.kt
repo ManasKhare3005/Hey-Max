@@ -91,6 +91,7 @@ class MaxService : Service() {
                 nm.notify(LINK_ID, linkNotification("Connected to Max"))
                 // Tell the laptop which apps are installed, so "open Instagram on my phone" works
                 scope.launch { runCatching { api.phoneState(PhoneActions.state(this@MaxService)) } }
+                Sync.trigger(this@MaxService, 300)        // reminders, events, recordings made while apart
             }.let { }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -155,12 +156,19 @@ class MaxService : Service() {
                 Hub.removeApproval(id)
                 nm.cancel(APPROVAL_BASE + id)
             }
-            "reminder" -> if (data.optString("action") == "fired") {
-                notify(MaxApp.CH_REMINDER, "⏰ Reminder", data.optString("text"))
+            "reminder" -> when (data.optString("action")) {
+                "fired" -> reminderFired(data.optString("uid"), data.optString("text"))
+                else -> Sync.trigger(this)                  // added / cancelled on the laptop: copy it here
             }
-            "notes" -> when (data.optString("action")) {
-                "saved" -> notify(MaxApp.CH_UPDATE, "Notes ready", data.optString("title"))
-                "failed" -> notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
+            "event", "sync" -> Sync.trigger(this)
+            "notes" -> {
+                val rec = data.optString("uid").takeIf { it.isNotBlank() }?.let { LocalDb.get(this).recording(it) }
+                when (data.optString("action")) {
+                    "saved" -> if (rec != null) Sync.finished(this, LocalDb.get(this), rec, data.optInt("note_id"))
+                               else notify(MaxApp.CH_UPDATE, "Notes ready", data.optString("title"))
+                    "failed" -> if (rec != null) LocalDb.get(this).put(rec.copy(state = "failed", error = data.optString("error")))
+                                else notify(MaxApp.CH_UPDATE, "Notes failed", data.optString("error"))
+                }
             }
             "devjob" -> when (data.optString("status")) {
                 "ready" -> notify(MaxApp.CH_UPDATE, "Change ready for your OK", data.optString("request"))
@@ -187,6 +195,20 @@ class MaxService : Service() {
             }
         }
         Hub.events.tryEmit(MaxEvent(kind, data))
+    }
+
+    /** The laptop fired a reminder. The phone has its own alarm for it: show it only once. */
+    private fun reminderFired(uid: String, text: String) {
+        val db = LocalDb.get(this)
+        val local = if (uid.isNotBlank()) db.reminder(uid) else null
+        if (local != null && local.status != "pending") return          // this phone's alarm already showed it
+        if (uid.isNotBlank()) {
+            Alarms.show(this, uid, text)
+            if (local != null) db.put(local.copy(status = "done", dirty = false))
+            Alarms.cancel(this, uid)
+        } else {
+            notify(MaxApp.CH_REMINDER, "⏰ Reminder", text)
+        }
     }
 
     /** Deadline countdown: "Due in 3 hours: Lab 4", "Class in 10 minutes: ..." (tap opens the link). */

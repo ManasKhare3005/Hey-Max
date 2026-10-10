@@ -44,6 +44,8 @@ class Privacy:
             ("conversations", "Conversations", "What you said and Max's replies (searchable history)", "data/max.db", f"{n('turns')} turns"),
             ("actions", "Action log", "Tools Max used and approvals", "data/max.db", f"{n('actions')} entries"),
             ("reminders", "Reminders", "Pending, done and cancelled reminders", "data/max.db", f"{n('reminders')} reminders"),
+            ("events", "Calendar events", "Events in Max's calendar (the phone's Max calendar follows)", "data/max.db",
+             f"{n('events')} events"),
             ("notes", "Meeting & lecture notes", "Notes, transcripts and summaries (no audio is ever kept)", str(self.notes_dir),
              f"{n('notes')} sessions · {_size(self.notes_dir) // 1024} KB"),
             ("quick_notes", "Quick notes", "“Take a note: …”", str(self.quick_notes), f"{_size(self.quick_notes) // 1024} KB"),
@@ -84,7 +86,8 @@ class Privacy:
 
     def delete(self, category: str) -> str:
         m = self.ctx.memory
-        tables = {"facts": "facts", "conversations": "turns", "actions": "actions", "reminders": "reminders", "state": "kv"}
+        tables = {"facts": "facts", "conversations": "turns", "actions": "actions", "reminders": "reminders",
+                  "events": "events", "state": "kv"}
         if category in tables:
             if m is None:
                 return "Memory is off."

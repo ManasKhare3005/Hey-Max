@@ -959,6 +959,9 @@ def api_client(run_command=lambda text, source="dashboard": f"echo: {text}", tok
     ctx = Context(load_config(), FakeLLM([]))
     ctx.memory = memory_store()
     ctx.reminders = Reminders(ctx.memory)
+    from max_assistant.agenda import Events
+
+    ctx.events = Events(ctx.memory)
     bus = EventBus()
     approvals = ApprovalBroker(bus)
     rt = Runtime(ctx, bus, approvals, run_command, {"name": "Max"}, token=token)
@@ -1604,9 +1607,7 @@ def test_phone_tools_send_actions_and_speak_the_phones_answer(tmp_path):
     assert (sent[-1]["params"]["hour"], sent[-1]["params"]["minute"]) == (6, 45)
     reg.run("phone_message", {"contact": "Mom", "text": "running late", "app": "telegram"})
     assert sent[-1]["params"] == {"contact": "Mom", "text": "running late", "app": "sms"}
-    reg.run("phone_calendar_add", {"title": "Study group", "when": "tomorrow at 3pm", "duration_minutes": 90})
-    p = sent[-1]["params"]
-    assert p["end"] - p["begin"] == 90 * 60_000
+    assert "phone_calendar_add" not in reg.tools          # events go to Max's calendar (add_event) now
     assert reg.tools["phone_call"].risky and not reg.tools["phone_message"].risky   # texts: the user taps Send
     reg.run("phone_notifications", {"app": "all"})
     assert sent[-1]["params"] == {"app": "", "count": 8}
@@ -2435,8 +2436,57 @@ def test_speaker_tells_the_avatar_before_and_after_each_sentence(monkeypatch):
     assert [a for a, _ in told] == ["start", "end"]
     assert played == [(1, 16000)]                              # the envelope went out before the audio
     assert told[0][1]["rate"] == 60 and len(told[0][1]["env"]) == 60 and told[0][1]["duration"] == 1.0
+    assert len(told[0][1]["vis"]) == 60 and len(told[0][1]["vis"][0]) == 5     # mouth shapes per frame
+    assert told[0][1]["text"] == "Hello there."                # the avatar's face and hands follow the words
     s.on_speech = lambda action, data: 1 / 0                   # a broken listener never stops speech
     s.say("Still talking.")
+
+
+def test_mouth_shapes_follow_the_vowel():
+    from max_assistant.tts import VISEMES, viseme_track
+
+    sr = 16000
+    t = np.arange(sr // 2) / sr
+
+    def vowel(f1, f2):        # a buzz at 120 Hz with two formant-ish peaks
+        return sum(np.sin(2 * np.pi * f * t) * a for f, a in ((120, 0.3), (f1, 0.5), (f2, 0.4))).astype(np.float32)
+
+    audio = np.concatenate([vowel(800, 1200), vowel(300, 2400), vowel(350, 700), np.zeros(sr // 4, np.float32)])
+    track = viseme_track(audio, sr)
+    assert len(track) == len(audio) // (sr // 60) and all(len(f) == 5 for f in track)
+
+    def main_shape(a, b):
+        avg = np.mean(track[a:b], axis=0)
+        return VISEMES[int(np.argmax(avg))]
+
+    assert main_shape(5, 25) == "aa"                    # open: high F1
+    assert main_shape(35, 55) in ("ee", "ih")           # front: high F2
+    assert main_shape(65, 85) in ("ou", "oh")           # rounded: low F2
+    assert max(max(f) for f in track[-10:]) == 0        # silence: mouth shut
+    assert viseme_track(np.zeros(0, np.float32), sr) == []
+
+
+def test_avatar_remembers_where_it_was_dragged(tmp_path):
+    import json
+
+    from max_assistant.avatar import PositionKeeper, saved_position
+
+    path = tmp_path / "pos.json"
+    keeper = PositionKeeper(path)
+    keeper.check((100, 100, 440, 520))                  # where it started: nothing saved
+    keeper.check((100, 100, 440, 520))
+    assert not path.exists()
+    keeper.check((300, 200, 640, 620))                  # being dragged...
+    assert not path.exists()
+    keeper.check((300, 200, 640, 620))                  # ...and settled
+    assert json.loads(path.read_text()) == {"x": 300, "y": 200, "w": 340, "h": 420}
+    keeper.check(None)                                  # hidden: no change
+    assert saved_position(path) == (300, 200)
+    assert saved_position(path, size=(400, 420)) == (270, 200)   # a wider window: he stays in place
+    path.write_text(json.dumps({"x": -99999, "y": -99999}))
+    assert saved_position(path) is None                 # that screen is gone
+    path.write_text("not json")
+    assert saved_position(path) is None
 
 
 def test_models_asleep_is_published_once_per_change():
@@ -2472,3 +2522,187 @@ def test_avatar_outline_runs_become_window_rectangles():
     rects = sorted(outline_rects(10, 10, runs, 100, 200))
     assert rects == sorted([(30, 40, 60, 100), (10, 100, 80, 120), (0, 180, 20, 200), (50, 180, 100, 200)])
     assert outline_rects(10, 10, [], 100, 200) == []
+
+
+# ---------- the phone on its own: reminders / events sync, recordings uploaded later ----------
+
+def test_sync_merge_rule():
+    from max_assistant.sync import wins
+
+    assert wins({"status": "done", "updated_ms": 1}, {"status": "pending", "updated_ms": 9})       # finished beats open
+    assert not wins({"status": "pending", "updated_ms": 9}, {"status": "cancelled", "updated_ms": 1})
+    assert wins({"status": "pending", "updated_ms": 5}, {"status": "pending", "updated_ms": 4})     # later edit wins
+    assert not wins({"status": "pending", "updated_ms": 4}, {"status": "pending", "updated_ms": 4})  # tie keeps ours
+
+
+def test_reminders_get_uids_on_an_old_database():
+    import sqlite3
+
+    from max_assistant.memory import MemoryStore
+    from max_assistant.reminders import Reminders
+
+    store = MemoryStore(":memory:", WordEmbedder())
+    store.db.execute("DROP TABLE reminders")
+    store.db.execute("CREATE TABLE reminders (id INTEGER PRIMARY KEY, text TEXT NOT NULL, due TEXT NOT NULL, "
+                     "created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', fired TEXT)")
+    store.db.execute("INSERT INTO reminders (text, due, created) VALUES ('old one', '2030-01-01T09:00:00', 'x')")
+    r = Reminders(store)
+    old = r.pending()[0]
+    assert len(old.uid) == 32 and old.updated > 0 and not old.on_phone
+    try:
+        store.db.execute("INSERT INTO reminders (text, due, created, uid) VALUES ('dup', 'x', 'x', ?)", (old.uid,))
+        raise AssertionError("uids must be unique")
+    except sqlite3.IntegrityError:
+        pass
+
+
+def test_phone_and_laptop_reminders_sync_both_ways():
+    import datetime as dt
+
+    client, rt = api_client()
+    laptop = rt.ctx.reminders
+    soon = dt.datetime.now().replace(microsecond=0) + dt.timedelta(hours=2)
+    ms = lambda d: int(d.timestamp() * 1000)
+    mine = laptop.add("set by voice", soon)
+    # made on the phone while the laptop was off
+    out = client.post("/api/sync", json={"reminders": [
+        {"uid": "p1", "text": "buy milk", "due_ms": ms(soon), "status": "pending", "updated_ms": 1000},
+        {"uid": mine.uid, "text": "set by voice", "due_ms": ms(mine.due), "status": "done", "updated_ms": 1},
+    ]}).json()
+    assert laptop.by_uid("p1").text == "buy milk" and laptop.by_uid("p1").due == soon
+    assert laptop.by_uid(mine.uid).status == "done"            # the phone fired it: done beats pending
+    got = {r["uid"]: r for r in out["reminders"]}
+    assert set(got) == {"p1", mine.uid} and got[mine.uid]["status"] == "done"
+    assert all(r.on_phone for r in laptop.for_sync())          # the phone holds them all now
+    # an older edit from the phone doesn't undo a newer one on the laptop
+    laptop.set_status(laptop.by_uid("p1").id, "cancelled")
+    client.post("/api/sync", json={"reminders": [
+        {"uid": "p1", "text": "buy oat milk", "due_ms": ms(soon), "status": "pending", "updated_ms": 2000}]})
+    assert laptop.by_uid("p1").status == "cancelled"
+    assert client.post("/api/sync", json={"reminders": [{"uid": "", "text": "x", "due_ms": 0}]}).status_code == 200
+
+
+def test_missed_reminders_the_phone_showed_stay_quiet():
+    import datetime as dt
+
+    from max_assistant.reminders import ReminderScheduler, Reminders
+
+    r = Reminders(memory_store())
+    now = dt.datetime.now()
+    shown = r.add("phone had this", now - dt.timedelta(hours=3))
+    r.add("laptop only", now - dt.timedelta(hours=3))
+    on_time = r.add("on time", now - dt.timedelta(seconds=20))
+    r.mark_on_phone([shown.uid, on_time.uid])
+    fired = []
+    ReminderScheduler(r, lambda rem, missed: fired.append((rem.text, missed))).check(now)
+    assert sorted(fired) == [("laptop only", True), ("on time", False)]   # due right now: both devices ring
+    assert r.pending() == []
+
+
+def test_events_tools_api_and_sync():
+    import datetime as dt
+
+    client, rt = api_client()
+    from max_assistant.tools import memory as memory_tools
+
+    reg = ToolRegistry(context=rt.ctx)
+    memory_tools.register(reg)
+    out = reg.run("add_event", {"title": "Study group", "when": "tomorrow at 3pm", "duration_minutes": 90})
+    assert out == "Added to your calendar: Study group, tomorrow at 3 PM."
+    assert reg.run("add_event", {"title": "Mom's birthday", "when": "in 3 days"}).startswith("Added")
+    assert reg.run("add_event", {"title": "Picnic", "when": "next saturday"}).endswith("(all day).")
+    assert reg.run("add_event", {"title": "x", "when": "blorp"}).startswith("Error")
+    upcoming = rt.ctx.events.upcoming(30)
+    study = next(x for x in upcoming if x.title == "Study group")
+    assert (study.end - study.start) == dt.timedelta(minutes=90) and not study.all_day
+    picnic = next(x for x in upcoming if x.title == "Picnic")
+    assert picnic.all_day and picnic.start.hour == 0 and picnic.end - picnic.start == dt.timedelta(days=1)
+    assert reg.run("list_events", {"day": "tomorrow"}).startswith("On your calendar tomorrow: Study group")
+    assert "Study group" in [x["title"] for x in client.get("/api/events").json()]
+    # an event made on the phone offline, and the phone deleting one of the laptop's
+    start = dt.datetime.now().replace(microsecond=0) + dt.timedelta(days=2)
+    ms = lambda d: int(d.timestamp() * 1000)
+    out = client.post("/api/sync", json={"events": [
+        {"uid": "pe1", "title": "Dentist", "start_ms": ms(start), "end_ms": ms(start) + 1800_000, "all_day": False,
+         "location": "Tempe", "status": "active", "updated_ms": ms(dt.datetime.now())},
+        {**study.to_sync(), "status": "cancelled", "updated_ms": study.updated + 1}]}).json()
+    assert rt.ctx.events.by_uid("pe1").location == "Tempe"
+    assert rt.ctx.events.by_uid(study.uid).status == "cancelled"
+    assert {x["uid"] for x in out["events"]} >= {"pe1", study.uid, picnic.uid}   # cancelled sent: the phone drops it
+    assert reg.run("cancel_event", {"which": "dentist"}).startswith("Removed from your calendar: Dentist")
+    assert "events" in client.get("/api/today").json()
+
+
+def test_phone_recording_upload_becomes_notes(tmp_path):
+    import datetime as dt
+
+    import numpy as np
+
+    from max_assistant.notes import NotesManager
+    from max_assistant.phone_notes import PhoneRecordings
+
+    client, rt = api_client()
+    ctx = rt.ctx
+    heard = []
+
+    def transcriber():
+        def transcribe(audio, prompt):
+            heard.append(len(audio))
+            return "The homework is due Friday at 11:59 PM. Today we cover sorting."
+        return transcribe
+
+    ctx.notes = NotesManager(ctx, transcriber, tmp_path / "notes")
+    ctx.notes.summarize = lambda system, text, n: "## Summary\nSorting lecture."
+    events = []
+    ctx.phone_notes = pn = PhoneRecordings(ctx, tmp_path / "rec", on_event=lambda k, d: events.append((k, d)),
+                                           decoder=lambda path: np.full(16000 * 70, 0.1, np.float32))
+    pn.start = lambda: pn                     # no background thread: process() is called below
+    started = dt.datetime(2026, 10, 9, 9, 30)
+    r = client.post("/api/notes/upload?uid=rec-1&kind=lecture&started_ms=" + str(int(started.timestamp() * 1000)),
+                    content=b"fake aac bytes")
+    assert r.status_code == 200 and r.json()["state"] == "queued" and r.json()["title"] == "Lecture Oct 9, 9:30 AM"
+    assert pn.pending() == ["rec-1"]
+    st = pn.process("rec-1")
+    assert st["state"] == "done" and heard and sum(heard) == 16000 * 70
+    note = ctx.memory.note(st["note_id"])
+    assert note["started"] == "2026-10-09T09:30:00"           # dated when it was recorded
+    assert "Sorting lecture" in note["summary"]
+    assert pn.pending() == [] and not list((tmp_path / "rec").glob("*.audio"))   # no audio kept
+    assert client.get("/api/notes/upload/rec-1").json()["note_id"] == st["note_id"]
+    assert ("notes", "saved") in [(k, d["action"]) for k, d in events]
+    # uploading again (the phone didn't hear back) changes nothing
+    again = client.post("/api/notes/upload?uid=rec-1", content=b"fake aac bytes").json()
+    assert again["state"] == "done" and pn.pending() == []
+    assert client.get("/api/notes/upload/nope").status_code == 404
+    assert client.post("/api/notes/upload?uid=..%2F", content=b"x").status_code == 400
+    # a broken file: kept (renamed) and reported; a new upload can retry
+    def broken(path):
+        raise RuntimeError("bad audio")
+    pn.decoder = broken
+    client.post("/api/notes/upload?uid=rec-2", content=b"junk")
+    assert pn.process("rec-2")["state"] == "failed" and (tmp_path / "rec" / "rec-2.failed").exists()
+    assert client.post("/api/notes/upload?uid=rec-2", content=b"junk").json()["state"] == "queued"
+
+
+def test_decoding_an_aac_recording(tmp_path):
+    """The phone records AAC (ADTS); PyAV (faster-whisper's decoder) reads it."""
+    import av
+    import numpy as np
+
+    from max_assistant.phone_notes import decode
+
+    path = tmp_path / "x.aac"
+    with av.open(str(path), "w", format="adts") as out:
+        stream = out.add_stream("aac", rate=16000)
+        stream.layout = "mono"
+        t = np.arange(16000 * 2) / 16000
+        pcm = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
+        for i in range(0, len(pcm), 1024):
+            frame = av.AudioFrame.from_ndarray(pcm[None, i:i + 1024], format="flt", layout="mono")
+            frame.sample_rate = 16000
+            for packet in stream.encode(frame):
+                out.mux(packet)
+        for packet in stream.encode(None):
+            out.mux(packet)
+    audio = decode(path)
+    assert abs(len(audio) / 16000 - 2.0) < 0.2 and float(np.abs(audio).max()) > 0.1

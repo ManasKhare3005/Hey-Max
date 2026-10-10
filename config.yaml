@@ -120,16 +120,16 @@ mail:
 
 avatar:
   # Max as a 3D character in the bottom-right corner (dashboard/avatar.html, max_assistant/avatar).
-  # Runs on the integrated GPU and the CPU's efficiency cores so it doesn't slow Max down.
+  # Runs on the integrated GPU (and on the CPU's efficiency cores while Whisper works) so it doesn't slow Max down.
   enabled: true
-  fps: 90                  # even pacing on the 180 Hz screen (60 judders); 0 = every refresh
+  fps: 0                   # 0 = every screen refresh (180 Hz here: measured steady, ~0.8 core more than 90); 90 = lighter
   asleep_fps: 30           # while the models sleep ("go to sleep")
-  busy_fps: 30             # for the half second Whisper is transcribing
+  busy_fps: 60             # while Whisper transcribes (he's on the E-cores then; 60 still divides 180)
   scale: 2                 # render resolution per screen pixel (2 = supersampled, sharp)
   lip_sync_delay_ms: 80    # mouth vs sound; raise if the mouth moves before the voice
   hide_for_fullscreen_games: true   # games only: maximised Chrome / videos don't hide it
   games: []                # extra game .exe names, if one isn't detected (e.g. ["MyGame.exe"])
-  efficiency_cores: true
+  efficiency_cores: true   # pin to the E-cores while Whisper transcribes
   model: ""                # another VRM under dashboard/dist, e.g. avatar/candidates/X.vrm
 
 dev:

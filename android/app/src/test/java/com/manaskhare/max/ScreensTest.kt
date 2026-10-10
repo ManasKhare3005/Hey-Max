@@ -16,6 +16,9 @@ import com.manaskhare.max.ui.Looks
 import com.manaskhare.max.ui.MaxTheme
 import com.manaskhare.max.ui.SettingsScreen
 import com.manaskhare.max.ui.TodayScreen
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import org.junit.Rule
 import org.junit.Test
 
@@ -59,4 +62,37 @@ class ScreensTest {
     }
     @Test fun appearance() { shot(Look(ringBars = true)) { AppearanceScreen {} } }
     @Test fun today() { val m = vm(); shot(Look(accent = Accent.EMERALD, font = FontTheme.TECH)) { TodayScreen(m) } }
+
+    /** Laptop off: reminders, events and recordings kept on the phone (sample data; no SQLite here). */
+    @Test fun offline_cards() {
+        val m = vm()
+        val at = { days: Long, h: Int -> Offline.ms(java.time.LocalDate.now().plusDays(days).atTime(h, 0)) }
+        val reminders = listOf(LocalReminder("r1", "Submit the lab report", at(0, 21)),
+                               LocalReminder("r2", "Call mom", at(1, 18), dirty = false, synced = true))
+        val events = listOf(LocalEvent("e1", "Study group", at(1, 15), at(1, 16), location = "Hayden Library"),
+                            LocalEvent("e2", "Career fair", at(3, 0), at(4, 0), allDay = true, dirty = false, synced = true))
+        val recordings = listOf(LocalRecording("p1", "lecture", "CSE 572 week 7", at(0, 9), 4380, "x", "waiting"),
+                                LocalRecording("p2", "meeting", "Project sync", at(-1, 14), 1500, "x", "processing"),
+                                LocalRecording("p3", "lecture", "CSE 511 midterm review", at(-2, 10), 4800, "x", "done", noteId = 7),
+                                LocalRecording("p4", "lecture", "Physics lab", at(-3, 10), 600, "x", "failed", error = "bad audio"))
+        paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_6.copy(screenHeight = 4200))
+        val owner = object : androidx.activity.result.ActivityResultRegistryOwner {   // permission prompts (not shown)
+            override val activityResultRegistry = object : androidx.activity.result.ActivityResultRegistry() {
+                override fun <I, O> onLaunch(requestCode: Int, contract: androidx.activity.result.contract.ActivityResultContract<I, O>,
+                                             input: I, options: androidx.core.app.ActivityOptionsCompat?) {}
+            }
+        }
+        shot(Look()) {
+            androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides owner) {
+            androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.padding(16.dp)) {
+                com.manaskhare.max.ui.OfflineNote()
+                com.manaskhare.max.ui.CalendarCard(events)
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                com.manaskhare.max.ui.RemindersCard(reminders)
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                com.manaskhare.max.ui.PhoneRecorderCard(m, {}, recordings)
+            }
+            }
+        }
+    }
 }

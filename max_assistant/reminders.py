@@ -1,8 +1,11 @@
 """Reminders: stored in the memory database, fired by a background scheduler.
 
 When one is due, Max says it out loud and shows a Windows notification. Reminders that
-came due while Max wasn't running are announced at the next start ("While you were away").
-Until the phone/watch apps exist (Phase 4/5) they only reach you through the laptop.
+came due while Max wasn't running are announced at the next start ("While you were away"),
+except ones the phone has a copy of: the phone already showed those, so Max stays quiet.
+
+Every reminder has a `uid` (shared with the phone, which keeps its own copy and fires it even
+when the laptop is off) and an `updated` time; sync.py merges the two sides.
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import datetime as dt
 import logging
 import re
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,6 +33,22 @@ _REWRITES = [
     (r"\bnight\b", "9 pm"),
 ]
 _HAS_TIME = re.compile(r"\d\s*(am|pm|a\.m|p\.m)|\d:\d\d|\bnoon\b|\bmidnight\b|\bin\s+\d+\s*(min|hour|sec)|o'?clock", re.I)
+
+
+def has_time(text: str) -> bool:
+    """Does the phrase name a time of day (not just a day)?"""
+    phrase = text
+    for pattern, repl in _REWRITES:
+        phrase = re.sub(pattern, repl, phrase, flags=re.I)
+    return bool(_HAS_TIME.search(phrase)) or bool(re.search(r"T\d\d:\d\d", phrase))
+
+
+def new_uid() -> str:
+    return uuid.uuid4().hex
+
+
+def now_ms() -> int:
+    return int(dt.datetime.now().timestamp() * 1000)
 
 
 def parse_when(text: str, now: dt.datetime | None = None) -> dt.datetime | None:
@@ -68,25 +88,95 @@ class Reminder:
     text: str
     due: dt.datetime
     status: str = "pending"
+    uid: str = ""
+    updated: int = 0              # ms since the epoch, for sync
+    on_phone: bool = False        # the phone has a copy (and fires it itself)
+
+    def to_sync(self) -> dict:
+        return {"uid": self.uid, "text": self.text, "due_ms": int(self.due.timestamp() * 1000),
+                "status": self.status, "updated_ms": self.updated}
+
+
+def migrate(db):
+    """Older databases: add uid / updated / on_phone to reminders."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(reminders)")}
+    if "uid" not in cols:
+        db.execute("ALTER TABLE reminders ADD COLUMN uid TEXT")
+    if "updated" not in cols:
+        db.execute("ALTER TABLE reminders ADD COLUMN updated INTEGER NOT NULL DEFAULT 0")
+    if "on_phone" not in cols:
+        db.execute("ALTER TABLE reminders ADD COLUMN on_phone INTEGER NOT NULL DEFAULT 0")
+    for (rid,) in db.execute("SELECT id FROM reminders WHERE uid IS NULL OR uid = ''").fetchall():
+        db.execute("UPDATE reminders SET uid = ?, updated = ? WHERE id = ?", (new_uid(), now_ms(), rid))
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS reminders_uid ON reminders(uid)")
+    db.commit()
 
 
 class Reminders:
     def __init__(self, store):
         self.store = store            # MemoryStore (shares its database and lock)
+        with store.lock:
+            migrate(store.db)
 
-    def add(self, text: str, due: dt.datetime) -> Reminder:
+    def add(self, text: str, due: dt.datetime, uid: str = "") -> Reminder:
+        uid, updated = uid or new_uid(), now_ms()
+        due = due.replace(microsecond=0)
         with self.store.lock:
-            cur = self.store.db.execute("INSERT INTO reminders (text, due, created) VALUES (?, ?, ?)",
-                                        (text.strip(), due.isoformat(timespec="seconds"),
-                                         dt.datetime.now().isoformat(timespec="seconds")))
+            cur = self.store.db.execute(
+                "INSERT INTO reminders (text, due, created, uid, updated) VALUES (?, ?, ?, ?, ?)",
+                (text.strip(), due.isoformat(timespec="seconds"),
+                 dt.datetime.now().isoformat(timespec="seconds"), uid, updated))
             self.store.db.commit()
-            return Reminder(cur.lastrowid, text.strip(), due)
+            return Reminder(cur.lastrowid, text.strip(), due, uid=uid, updated=updated)
 
     def _rows(self, where: str, args=()) -> list[Reminder]:
         with self.store.lock:
-            rows = self.store.db.execute(f"SELECT id, text, due, status FROM reminders WHERE {where} ORDER BY due",
-                                         args).fetchall()
-        return [Reminder(r["id"], r["text"], dt.datetime.fromisoformat(r["due"]), r["status"]) for r in rows]
+            rows = self.store.db.execute(
+                f"SELECT id, text, due, status, uid, updated, on_phone FROM reminders WHERE {where} ORDER BY due",
+                args).fetchall()
+        return [Reminder(r["id"], r["text"], dt.datetime.fromisoformat(r["due"]), r["status"], r["uid"],
+                         r["updated"], bool(r["on_phone"])) for r in rows]
+
+    def by_uid(self, uid: str) -> Reminder | None:
+        rows = self._rows("uid = ?", (uid,))
+        return rows[0] if rows else None
+
+    def for_sync(self, days: int = 14) -> list[Reminder]:
+        """Pending ones, and any that changed lately (so the phone hears about done / cancelled)."""
+        since = int((dt.datetime.now() - dt.timedelta(days=days)).timestamp() * 1000)
+        return self._rows("status = 'pending' OR updated >= ?", (since,))
+
+    def apply_sync(self, item: dict) -> Reminder | None:
+        """A reminder from the phone: insert it, or update ours if theirs wins (sync.wins)."""
+        from .sync import wins
+
+        uid = str(item.get("uid") or "")
+        if not uid or not str(item.get("text") or "").strip():
+            return None
+        due = dt.datetime.fromtimestamp(int(item["due_ms"]) / 1000).replace(microsecond=0)
+        status = item.get("status") if item.get("status") in ("pending", "done", "cancelled") else "pending"
+        updated = int(item.get("updated_ms") or now_ms())
+        ours = self.by_uid(uid)
+        with self.store.lock:
+            if ours is None:
+                self.store.db.execute(
+                    "INSERT INTO reminders (text, due, created, status, uid, updated, on_phone) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (str(item["text"]).strip(), due.isoformat(timespec="seconds"),
+                     dt.datetime.now().isoformat(timespec="seconds"), status, uid, updated))
+            elif wins({**item, "status": status, "updated_ms": updated}, ours.to_sync()):
+                updated = max(updated, ours.updated)      # never older than what we had (phone clocks drift)
+                self.store.db.execute(
+                    "UPDATE reminders SET text = ?, due = ?, status = ?, updated = ?, on_phone = 1 WHERE uid = ?",
+                    (str(item["text"]).strip(), due.isoformat(timespec="seconds"), status, updated, uid))
+            else:
+                self.store.db.execute("UPDATE reminders SET on_phone = 1 WHERE uid = ?", (uid,))
+            self.store.db.commit()
+        return self.by_uid(uid)
+
+    def mark_on_phone(self, uids: list[str]):
+        with self.store.lock:
+            self.store.db.executemany("UPDATE reminders SET on_phone = 1 WHERE uid = ?", [(u,) for u in uids])
+            self.store.db.commit()
 
     def pending(self) -> list[Reminder]:
         return self._rows("status = 'pending'")
@@ -97,8 +187,8 @@ class Reminders:
 
     def set_status(self, rid: int, status: str):
         with self.store.lock:
-            self.store.db.execute("UPDATE reminders SET status = ?, fired = ? WHERE id = ?",
-                                  (status, dt.datetime.now().isoformat(timespec="seconds"), rid))
+            self.store.db.execute("UPDATE reminders SET status = ?, fired = ?, updated = ? WHERE id = ?",
+                                  (status, dt.datetime.now().isoformat(timespec="seconds"), now_ms(), rid))
             self.store.db.commit()
 
     def find(self, description: str) -> Reminder | None:
@@ -135,6 +225,9 @@ class ReminderScheduler:
         now = now or dt.datetime.now()
         for r in self.reminders.due(now):
             missed = (now - r.due).total_seconds() > self.missed_after_s
+            if missed and r.on_phone:          # the phone showed it while Max was away: stay quiet
+                self.reminders.set_status(r.id, "done")
+                continue
             try:
                 self.fire(r, missed)
             except Exception as exc:

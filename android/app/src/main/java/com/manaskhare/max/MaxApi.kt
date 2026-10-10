@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,6 +21,7 @@ class MaxApi(private val base: String, private val token: String) {
         private val JSON = "application/json".toMediaType()
         private val WAV = "audio/wav".toMediaType()
         private val BINARY = "application/octet-stream".toMediaType()
+        private val AAC = "audio/aac".toMediaType()
 
         val http: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -87,6 +89,17 @@ class MaxApi(private val base: String, private val token: String) {
     suspend fun phoneResult(id: Int, ok: Boolean, message: String) =
         post("/api/phone/result", JSONObject().put("id", id).put("ok", ok).put("message", message))
     suspend fun phoneState(state: JSONObject) = post("/api/phone/state", state)
+    /** Offline work: send what changed on the phone, get the laptop's reminders and events back. */
+    suspend fun sync(body: JSONObject) = JSONObject(post("/api/sync", body))
+
+    /** A lecture / meeting recorded on the phone; the laptop writes its notes in the background. */
+    suspend fun uploadRecording(r: LocalRecording, file: java.io.File): JSONObject {
+        val q = "uid=${enc(r.uid)}&kind=${enc(r.kind)}&title=${enc(r.title)}&started_ms=${r.startedMs}"
+        return JSONObject(String(run(request("/api/notes/upload?$q").post(file.asRequestBody(AAC)).build())))
+    }
+    suspend fun recordingStatus(uid: String) = JSONObject(get("/api/notes/upload/${enc(uid)}"))
+    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+
     suspend fun notesStatus() = JSONObject(get("/api/notes/status"))
     suspend fun notesStart(kind: String) = post("/api/notes/start", JSONObject().put("kind", kind))
     suspend fun notesStop() = post("/api/notes/stop")

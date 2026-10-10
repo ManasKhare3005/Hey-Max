@@ -1,10 +1,11 @@
-"""Memory and reminder tools: remember / recall / forget, set / list / cancel reminders."""
+"""Memory, reminder and calendar tools: remember / recall / forget, set / list / cancel reminders,
+add / list / cancel events (Max's calendar, which the phone shows as its "Max" calendar)."""
 from __future__ import annotations
 
 import datetime as dt
 import re
 
-from ..reminders import Reminders, parse_when, spoken_time
+from ..reminders import Reminders, has_time, parse_when, spoken_time
 from .registry import DECLINED, ToolRegistry
 
 DAY_WORDS = {"today": 0, "yesterday": 1}
@@ -16,6 +17,11 @@ def register(reg: ToolRegistry):
     if store is None:
         return
     reminders: Reminders = ctx.reminders
+
+    def tell_phone(kind: str, **data):            # the phone copies the change on its next sync
+        bus = getattr(ctx, "bus", None)
+        if bus is not None:
+            bus.publish(kind, data)
 
     @reg.tool(
         "Save a fact about the user for later, when they say 'remember ...' (e.g. 'my exam is on "
@@ -86,7 +92,8 @@ def register(reg: ToolRegistry):
             return f"Error: I couldn't understand the time '{when}'. Ask the user when exactly."
         if due <= dt.datetime.now():
             return f"Error: {spoken_time(due)} is in the past. Ask the user for a future time."
-        reminders.add(text, due)
+        r = reminders.add(text, due)
+        tell_phone("reminder", action="added", uid=r.uid, text=r.text, due=due.isoformat())
         return f"Okay, I'll remind you {spoken_time(due)}: {text}."
 
     @reg.tool("List the pending reminders.", params={}, direct=True)
@@ -108,4 +115,65 @@ def register(reg: ToolRegistry):
         if r is None:
             return "You don't have any reminders."
         reminders.set_status(r.id, "cancelled")
+        tell_phone("reminder", action="cancelled", uid=r.uid)
         return f"Cancelled the reminder: {r.text}."
+
+    events = getattr(ctx, "events", None)
+    if events is None:
+        return
+
+    @reg.tool(
+        "Add an event to the user's calendar (Max's calendar, also on their phone), e.g. 'add a study "
+        "group tomorrow at 3pm', 'put the dentist on my calendar Friday at 10'. No time of day = all day. "
+        "(Something Max should say out loud at a time is set_reminder instead.)",
+        params={"title": {"type": "string"},
+                "when": {"type": "string", "description": "Start, e.g. 'tomorrow at 3pm', 'Friday', '2026-10-02T15:00'"},
+                "duration_minutes": {"type": "integer", "description": "Default 60"},
+                "location": {"type": "string"}},
+        required=["title", "when"],
+        direct=True,
+    )
+    def add_event(title: str, when: str, duration_minutes: int = 60, location: str = ""):
+        start = parse_when(when)
+        if start is None:
+            return f"Error: I couldn't understand the time '{when}'. Ask the user when exactly."
+        all_day = not has_time(when)
+        if (start.date() if all_day else start) < (dt.date.today() if all_day else dt.datetime.now()):
+            return f"Error: {when} is in the past. Ask the user for a future time."
+        e = events.add(title, start, duration_minutes or 60, location or "", all_day=all_day)
+        tell_phone("event", action="added", uid=e.uid)
+        return f"Added to your calendar: {e.spoken()}."
+
+    @reg.tool(
+        "List calendar events: on a day ('today', 'tomorrow', 'Friday') or, without a day, the next week.",
+        params={"day": {"type": "string", "description": "Optional, e.g. 'tomorrow'"}},
+        required=[],
+        direct=True,
+    )
+    def list_events(day: str = ""):
+        if day.strip():
+            when = parse_when(day)
+            if when is None:
+                return f"Error: I couldn't understand the day '{day}'."
+            items, span = events.on(when.date()), ("today" if when.date() == dt.date.today() else
+                                                    "tomorrow" if when.date() == dt.date.today() + dt.timedelta(days=1)
+                                                    else f"on {when:%A}")
+        else:
+            items, span = events.upcoming(7), "this coming week"
+        if not items:
+            return f"Nothing on your calendar {span}."
+        return f"On your calendar {span}: " + "; ".join(e.spoken() for e in items[:6]) + (
+            f", and {len(items) - 6} more" if len(items) > 6 else "") + "."
+
+    @reg.tool(
+        "Remove an event from the user's calendar.",
+        params={"which": {"type": "string", "description": "Which event, e.g. 'the dentist'"}},
+        direct=True,
+    )
+    def cancel_event(which: str):
+        e = events.find(which)
+        if e is None:
+            return "There's nothing coming up on your calendar."
+        events.cancel(e.uid)
+        tell_phone("event", action="cancelled", uid=e.uid)
+        return f"Removed from your calendar: {e.spoken()}."

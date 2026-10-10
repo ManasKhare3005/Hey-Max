@@ -52,6 +52,13 @@ reminders:
   - {say: "cancel my reminder about the oven", expect: cancel_reminder}
   - {say: "set a reminder for the lab report due next monday", expect: set_reminder}
 
+calendar:
+  - {say: "put the dentist on my calendar friday at 10am", expect: add_event, args: {title: dentist}}
+  - {say: "add an event called career fair next tuesday", expect: add_event}
+  - {say: "what's on my calendar tomorrow", expect: list_events}
+  - {say: "do i have anything planned this week", expect: [list_events, day_summary]}
+  - {say: "remove the dentist appointment from my calendar", expect: cancel_event}
+
 canvas_and_day:
   - {say: "what's due today", expect: canvas_due, args: {period: today}}
   - {say: "anything due tomorrow", expect: canvas_due, args: {period: tomorrow}}
@@ -92,7 +99,7 @@ phone:
   - {say: "how's my phone battery", expect: phone_status}
   - {say: "take me to tempe marketplace", expect: phone_navigate, args: {destination: tempe}, origin: phone}
   - {say: "play some lofi on spotify", expect: phone_play, args: {app: spotify}, origin: phone}
-  - {say: "add a study group to my calendar tomorrow at 3pm", expect: phone_calendar_add, origin: phone}
+  - {say: "add a study group to my calendar tomorrow at 3pm", expect: add_event, origin: phone}
   - {say: "email professor smith that i'll miss class", expect: [mail_send, phone_email], origin: phone}
   - {say: "search youtube for cooking videos", expect: open_website, args: {site: youtube}, origin: phone}
 

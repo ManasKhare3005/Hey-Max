@@ -182,6 +182,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Like call(), but a failure (laptop offline) says nothing: for background refreshes. */
+    fun <T> quiet(block: suspend (MaxApi) -> T, onResult: (T) -> Unit = {}) {
+        val api = MaxApi.from(prefs) ?: return
+        viewModelScope.launch { runCatching { block(api) }.onSuccess(onResult) }
+    }
+
     override fun onCleared() {
         recorder?.stop()
         player.stop()

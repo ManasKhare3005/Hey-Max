@@ -8,6 +8,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Working without the laptop: recording lectures, reminders that fire on time, the Max calendar -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -108,6 +114,13 @@
         </service>
 
         <receiver android:name=".ApprovalReceiver" android:exported="false" />
+        <receiver android:name=".ReminderAlarmReceiver" android:exported="false" />
+        <receiver android:name=".StopRecordingReceiver" android:exported="false" />
+
+        <service
+            android:name=".RecordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <service
             android:name=".MaxNotificationListener"

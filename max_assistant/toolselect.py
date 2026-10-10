@@ -23,9 +23,10 @@ CORE = ["open_website", "web_search", "open_app", "get_datetime"]
 FAMILIES: dict[str, list[str]] = {
     "browser": ["browser_click", "browser_type", "browser_navigate", "browser_media", "browser_read", "browser_tabs"],
     "phone": ["phone_open_app", "phone_call", "phone_message", "phone_alarm", "phone_timer", "phone_navigate",
-              "phone_play", "phone_calendar_add", "phone_email", "phone_notifications", "phone_status"],
+              "phone_play", "phone_email", "phone_notifications", "phone_status"],
     "memory": ["remember", "recall", "forget"],
     "reminders": ["set_reminder", "list_reminders", "cancel_reminder"],
+    "events": ["add_event", "list_events", "cancel_event"],
     "canvas": ["canvas_due", "canvas_classes", "day_summary", "email_digest"],
     "notes": ["start_notes", "stop_notes", "meeting_notes"],
     "quick_notes": ["take_note", "read_notes"],
@@ -40,9 +41,11 @@ FAMILIES: dict[str, list[str]] = {
 KEYWORDS: dict[str, re.Pattern] = {
     "phone": re.compile(r"\b(my phone|on (the |my )?phone|phone'?s|text (him|her|them|mom|dad)|whatsapp|call\s+\w+|alarm|timer|"
                         r"wake me|notifications?|what did i miss|navigate|directions|take me to|battery|spotify|instagram|"
-                        r"my calendar|email \w+)\b", re.I),
+                        r"email \w+)\b", re.I),
     "memory": re.compile(r"\b(remember|forget|what do you know about|do you remember|my (name|birthday|sister|brother|mom|dad))\b", re.I),
     "reminders": re.compile(r"\bremind|reminders?\b", re.I),
+    "events": re.compile(r"\b(calendar|events?|appointments?|what'?s on|am i (free|busy)|plans? (for|on)|"
+                         r"anything (on|planned))\b", re.I),
     "canvas": re.compile(r"\b(due|assignments?|homework|canvas|classes?|quiz|exam|deadline|my day|schedule|digest|summary|lab \d)\b", re.I),
     "notes": re.compile(r"\b(take notes|notes (on|for|of)|record (this|the)|lecture notes|meeting notes|stop (taking )?notes|"
                         r"key points|summar\w+ (of )?(the|my|today'?s) (lecture|meeting|class))\b", re.I),

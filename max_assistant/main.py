@@ -86,12 +86,14 @@ class Context:
         self.browser = None   # BrowserSession, set by tools.browser
         self.memory = None    # MemoryStore (facts, conversation log, actions)
         self.reminders = None
+        self.events = None     # agenda.Events: Max's calendar (synced to the phone's "Max" calendar)
         self.canvas = None     # CanvasFeed, when secrets.yaml has the feed link
         self.notes = None      # NotesManager (meeting / lecture notes)
         self.stt = None        # SpeechToText, shared with notes (voice mode creates it)
         self.confirm = lambda prompt: False   # spoken yes/no, set by build()
         self.bus = None        # events.EventBus, set by build()
         self.phone = None      # phone.PhoneBridge: actions on the user's phone
+        self.phone_notes = None  # phone_notes.PhoneRecordings: lectures recorded on the phone, written up here
         self.course = None     # course.CourseLibrary: slides, PDFs and lecture notes to answer from
         self.docnotes = None   # docnotes.DocNotes: study notes written from course files
         self.dev = None        # devloop.DevLoop: changes to Max requested from the phone, made by Claude Code
@@ -152,6 +154,9 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
 
         ctx.memory = MemoryStore(mem_cfg.get("db", "data/max.db"))
         ctx.reminders = Reminders(ctx.memory)
+        from .agenda import Events
+
+        ctx.events = Events(ctx.memory)
         on_event = _logging_events(ctx.memory, on_event)
     if bus is not None:
         inner = on_event
@@ -176,6 +181,10 @@ def build(cfg, confirm, on_event, bus=None, approvals=None):
                                  include_mic_in_meetings=notes_cfg.get("include_mic_in_meetings", True),
                                  live_model_dir=resolve_path(notes_cfg["live_model"])
                                  if notes_cfg.get("live_captions", True) and notes_cfg.get("live_model") else None)
+        if ctx.memory is not None:
+            from .phone_notes import PhoneRecordings
+
+            ctx.phone_notes = PhoneRecordings(ctx, on_event=on_event)
     course_cfg = cfg.get("course", {}) or {}
     if course_cfg.get("enabled", True) and ctx.memory is not None:
         from .course import CourseLibrary
@@ -321,7 +330,7 @@ def documents_done_text(done: list[str], failed: list[str], combined: list[str] 
 
 
 def start_reminders(ctx, announce):
-    """Run the reminder scheduler; `announce(text)` delivers the spoken/printed part."""
+    """Run the reminder scheduler; `announce(text, reminder)` delivers the spoken/printed part."""
     if ctx.reminders is None:
         return None
     from .reminders import ReminderScheduler, toast
@@ -329,7 +338,7 @@ def start_reminders(ctx, announce):
     def fire(reminder, missed):
         text = reminder_text(reminder, missed)
         toast("Max reminder", reminder.text)
-        announce(text)
+        announce(text, reminder)
 
     return ReminderScheduler(ctx.reminders, fire).start()
 
@@ -361,6 +370,8 @@ def start_dashboard(cfg, ctx, bus, approvals, run_command, info, controls=None):
             token = load_token(phone.get("token_file", "data/phone_token.txt"))
         server = serve(Runtime(ctx, bus, approvals, run_command, info, controls, token), host, port)
         print(f"🖥  Dashboard: http://{host}:{port}")
+        if ctx.phone_notes is not None and ctx.phone_notes.pending():
+            ctx.phone_notes.start()               # recordings uploaded before a restart: carry on
         return server
     except Exception as exc:                   # the assistant works without it
         log.warning("dashboard failed to start: %s", exc)
@@ -404,8 +415,8 @@ def run_text(cfg, verbose: bool):
     start_mail_alerts(ctx, bus)
     start_course(ctx)
     bus.publish("stage", {"stage": "text mode"})
-    start_reminders(ctx, lambda text: (bus.publish("reminder", {"action": "fired", "text": text}),
-                                       print(f"\n⏰ {text}\nyou > ", end="")))
+    start_reminders(ctx, lambda text, r: (bus.publish("reminder", {"action": "fired", "text": text, "uid": r.uid}),
+                                          print(f"\n⏰ {text}\nyou > ", end="")))
     print(f"{cfg.assistant.name} text mode. Type 'quit' to exit.\n")
     while True:
         try:
@@ -744,8 +755,8 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
     tweaks = keep_awake_in_background()
     if tweaks:
         log.info("background listening: %s", ", ".join(tweaks))
-    scheduler = start_reminders(ctx, lambda text: (bus.publish("reminder", {"action": "fired", "text": text}),
-                                                   announcements.put(text)))
+    scheduler = start_reminders(ctx, lambda text, r: (bus.publish("reminder", {"action": "fired", "text": text, "uid": r.uid}),
+                                                      announcements.put(text)))
     from .events import Controls
 
     controls = Controls()
@@ -786,8 +797,12 @@ def run_voice(cfg, verbose: bool, tray: bool = False):
 
             launch_with_max(cfg)                 # not running: this starts it (a second copy just exits)
 
+        def reset_avatar():
+            bus.publish("avatar", {"action": "reset"})      # back above the clock
+
         tray_icon = Tray(cfg.assistant.name, f"http://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}",
-                         sleep_models, controls, toggle_avatar if (cfg.get("avatar", {}) or {}).get("enabled") else None).start()
+                         sleep_models, controls, *((toggle_avatar, reset_avatar) if (cfg.get("avatar", {}) or {}).get("enabled")
+                                                   else (None, None))).start()
     say_main(f"{cfg.assistant.name} online.")
 
     try:

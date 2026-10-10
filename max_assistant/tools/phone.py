@@ -124,16 +124,8 @@ def register(reg: ToolRegistry):
     def phone_play(query: str, app: str = "spotify"):
         return ask("play", query=query, app=app)
 
-    @reg.tool(
-        "Add an event to the calendar on the user's phone. It opens filled in and the user taps Save. "
-        "(Reminders that Max should announce are set_reminder instead.)",
-        params={"title": {"type": "string"},
-                "when": {"type": "string", "description": "Start, e.g. 'tomorrow at 3pm'"},
-                "duration_minutes": {"type": "integer", "description": "Default 60"},
-                "location": {"type": "string"}},
-        required=["title", "when"],
-        direct=True,
-    )
+    # Not a tool any more: events go to Max's calendar (add_event), which the phone shows offline
+    # too. Kept for the phone's "calendar" action (opens the phone's own calendar, filled in).
     def phone_calendar_add(title: str, when: str, duration_minutes: int = 60, location: str = ""):
         from ..reminders import parse_when
 

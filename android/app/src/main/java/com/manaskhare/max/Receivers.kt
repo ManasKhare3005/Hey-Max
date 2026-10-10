@@ -30,9 +30,10 @@ class ApprovalReceiver : BroadcastReceiver() {
     }
 }
 
-/** Reconnect after a reboot or an app update. */
+/** Reconnect after a reboot or an app update, and re-arm reminders (a reboot clears alarms). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        runCatching { Alarms.armAll(context) }
         MaxApp.startLink(context)
     }
 }

@@ -81,7 +81,7 @@ INTENTS = {
     "media_control": re.compile(r"\b(skip|next) (this |the )?(song|track)\b|\b(previous|last) (song|track)\b|"
                                 r"\b(pause|resume|stop) (the )?(music|song|spotify)\b", re.I),
     "email_digest": re.compile(r"\b(email|send) me (my|the|today'?s)? ?(summary|digest|day)\b", re.I),
-    "phone_calendar_add": re.compile(r"\b(add|put|schedule)\b.+\b(to|on|in) my calendar\b", re.I),
+    "add_event": re.compile(r"\b(add|put|schedule)\b.+\b(to|on|in) my calendar\b", re.I),
     "phone_email": re.compile(r"^\W*(please\s+|can you\s+)*(email|e-mail)\s+(?!me\b)\w+(\s+\S+){2,}", re.I),
     "find_files": re.compile(r"\bopen my (resume|cv|report|essay|thesis|cover letter|transcript)\b|"
                              r"\bfind (my|the) .*\b(file|pdf|doc|document|presentation|spreadsheet)\b", re.I),
@@ -89,7 +89,7 @@ INTENTS = {
                              r"\bdid i get any (e-?mails?|mail)\b", re.I),
 }
 # Requests that already contain everything the tool needs: a question back doesn't excuse skipping it
-COMPLETE_INTENTS = {"phone_message", "read_screen", "volume", "media_control", "email_digest", "phone_calendar_add",
+COMPLETE_INTENTS = {"phone_message", "read_screen", "volume", "media_control", "email_digest", "add_event",
                     "phone_email", "find_files", "cancel_reminder", "mail_check"}
 # ...but only when they say which: "cancel my reminder" alone may fairly get "which one?"
 COMPLETE_ONLY_IF = {"cancel_reminder": re.compile(r"\breminders? (about|for|to)\s+\w+", re.I)}

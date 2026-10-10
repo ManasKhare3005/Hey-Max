@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Contacts
@@ -114,13 +116,20 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
     var calls by remember { mutableStateOf(granted(Manifest.permission.CALL_PHONE)) }
     var notifs by remember { mutableStateOf(PhoneActions.notificationAccess(context)) }
     var overlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var calendar by remember { mutableStateOf(com.manaskhare.max.MaxCalendar.allowed(context)) }
+    var exact by remember { mutableStateOf(com.manaskhare.max.Alarms.exact(context)) }
     LifecycleResumeEffect(Unit) {
         contacts = granted(Manifest.permission.READ_CONTACTS); calls = granted(Manifest.permission.CALL_PHONE)
         notifs = PhoneActions.notificationAccess(context); overlay = Settings.canDrawOverlays(context)
+        calendar = com.manaskhare.max.MaxCalendar.allowed(context); exact = com.manaskhare.max.Alarms.exact(context)
         onPauseOrDispose { }
     }
     val askPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         contacts = granted(Manifest.permission.READ_CONTACTS); calls = granted(Manifest.permission.CALL_PHONE)
+    }
+    val askCalendar = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        calendar = com.manaskhare.max.MaxCalendar.allowed(context)
+        if (calendar) com.manaskhare.max.Sync.trigger(context, 0)        // fills the new Max calendar
     }
     val openSettings = { action: String, withPackage: Boolean ->
         runCatching {
@@ -188,6 +197,23 @@ fun SettingsScreen(vm: MainViewModel, scanQr: () -> Unit) {
                 }
                 Text("“Listen now” makes the laptop listen as if you said “Hey Max”.", color = Text2, fontSize = 12.5.sp,
                      modifier = Modifier.padding(start = 6.dp, top = 8.dp))
+            }
+        }
+
+        item {
+            Section("Without the laptop") {
+                SettingRow("Calendar", Icons.Filled.CalendarMonth,
+                           subtitle = if (calendar) "✓ Max's events show in your calendar app as “Max”, offline too"
+                                      else "Show Max's events in your phone's calendar app",
+                           onClick = if (calendar) null else ({ askCalendar.launch(arrayOf(Manifest.permission.READ_CALENDAR,
+                                                                                         Manifest.permission.WRITE_CALENDAR)) }),
+                           trailing = if (calendar) ({ Check() }) else null)
+                RowDivider()
+                SettingRow("Reminders on time", Icons.Filled.Alarm,
+                           subtitle = if (exact) "✓ Reminders ring on this phone at the exact minute, laptop on or off"
+                                      else "Allow “Alarms & reminders”, or they may come a few minutes late",
+                           onClick = if (exact) null else ({ openSettings(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, true) }),
+                           trailing = if (exact) ({ Check() }) else null)
             }
         }
 

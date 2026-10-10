@@ -28,12 +28,13 @@ class DayPlan:
     due_soon: list[CanvasItem] = field(default_factory=list)      # next 3 days
     classes: list[CanvasItem] = field(default_factory=list)
     reminders: list = field(default_factory=list)                # Reminder objects due that day
+    events: list = field(default_factory=list)                   # agenda.Event objects that day
     mail: list = field(default_factory=list)                     # important unread email (mail.Mail)
     canvas_error: str = ""
 
     @property
     def empty(self) -> bool:
-        return not (self.due_today or self.due_soon or self.classes or self.reminders or self.mail)
+        return not (self.due_today or self.due_soon or self.classes or self.reminders or self.events or self.mail)
 
 
 def gather(ctx, day: dt.date | None = None) -> DayPlan:
@@ -49,6 +50,8 @@ def gather(ctx, day: dt.date | None = None) -> DayPlan:
             plan.canvas_error = str(exc)[:200]
     if ctx.reminders is not None:
         plan.reminders = [r for r in ctx.reminders.pending() if r.due.date() == day]
+    if getattr(ctx, "events", None) is not None:
+        plan.events = ctx.events.on(day)
     mail_cfg = ctx.cfg.get("mail", {}) or {}
     if getattr(ctx, "mail", None) is not None and mail_cfg.get("digest_important", True):
         try:   # Gmail's own "important" marker, unread, last 2 days
@@ -65,6 +68,9 @@ def spoken(plan: DayPlan) -> str:
         parts.append("Due today: " + ", ".join(f"{i.title} for {i.course}" for i in plan.due_today[:4]) + ".")
     if plan.classes:
         parts.append("Class: " + ", ".join(f"{c.course} {c.when}" for c in plan.classes[:3]) + ".")
+    if plan.events:
+        parts.append("Events: " + ", ".join(e.title + ("" if e.all_day else f" at {e.start.strftime('%I:%M %p').lstrip('0')}")
+                                            for e in plan.events[:4]) + ".")
     if plan.reminders:
         parts.append("Reminders: " + ", ".join(f"{r.text} at {r.due.strftime('%I:%M %p').lstrip('0')}" for r in plan.reminders[:3]) + ".")
     if plan.due_soon:
@@ -108,6 +114,8 @@ def render(plan: DayPlan, note: str, name: str = "Max") -> tuple[str, str, str]:
     sections = [
         ("Due today", [f"{i.title} ({i.course}) {i.when}" for i in plan.due_today]),
         ("Classes today", [f"{c.course} {c.title} {c.when}" + (f" · Zoom: {c.link}" if c.link else "") for c in plan.classes]),
+        ("Events", [e.title + (" (all day)" if e.all_day else f" at {e.start.strftime('%I:%M %p').lstrip('0')}")
+                    + (f" · {e.location}" if e.location else "") for e in plan.events]),
         ("Reminders", [f"{r.text} at {r.due.strftime('%I:%M %p').lstrip('0')}" for r in plan.reminders]),
         ("Coming up (next 3 days)", [f"{i.title} ({i.course}) {when_day(i)}" for i in plan.due_soon]),
         ("Important unread email", [f"{m.sender}: {m.subject}" for m in plan.mail]),

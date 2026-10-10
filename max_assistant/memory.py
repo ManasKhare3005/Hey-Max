@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY, text TEXT NOT NULL, due TEXT NOT NULL, created TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending', fired TEXT);
+CREATE TABLE IF NOT EXISTS events (
+    uid TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL,
+    all_day INTEGER NOT NULL DEFAULT 0, location TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active', created TEXT NOT NULL, updated INTEGER NOT NULL DEFAULT 0);
 """
 
 
@@ -95,7 +99,7 @@ class MemoryStore:
         self._turns = self._load_vectors("turns", "user || ' → ' || reply")
 
     # ----- privacy page: count, export, wipe -----
-    TABLES = ("facts", "turns", "actions", "reminders", "notes", "kv")
+    TABLES = ("facts", "turns", "actions", "reminders", "events", "notes", "kv")
 
     def count(self, table: str) -> int:
         assert table in self.TABLES
