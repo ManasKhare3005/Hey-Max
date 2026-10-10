@@ -13,6 +13,8 @@
  *   ?snapshot=1  save one rendered frame (just this canvas, not the screen) via the window, for checks
  *   ?debug=1     on-screen stats (fps, draw calls, triangles, GPU name)
  *   ?model=...   VRM to load (default avatar/model.vrm)
+ * Mouse: a click on him = talk to Max (like the wake word), a double click opens the Max app, a drag
+ * moves him (the window remembers where). When the pointer is near, he looks at it.
  * Every 2 s the stats are also handed to the desktop window (window.pywebview.api.report) so the
  * benchmark can read them.
  */
@@ -20,12 +22,14 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRM, VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 import { Behaviour, modeOf } from "./behaviour";
+import { GESTURES, REST, TALK, type GestureName, type TalkName } from "./gesture";
 import { connect } from "./link";
+import { nameMorphs } from "./face";
 
 const params = new URLSearchParams(location.search);
 const FPS = Number(params.get("fps") ?? 90);
 const ASLEEP_FPS = Number(params.get("asleep_fps") ?? 30);
-const BUSY_FPS = Number(params.get("busy_fps") ?? 30);
+const BUSY_FPS = Number(params.get("busy_fps") ?? 60);
 const WS = params.get("ws") || "ws://127.0.0.1:8765/api/ws";
 const LIPSYNC_MS = Number(params.get("lipsync_ms") ?? 80);
 const STANDALONE = params.get("standalone") === "1";
@@ -76,18 +80,48 @@ window.addEventListener("resize", () => {
 let vrm: VRM | null = null;
 let behaviour: Behaviour | null = null;
 
-type Api = { report?: (x: unknown) => void; shape?: (cols: number, rows: number, runs: number[][]) => void; snapshot?: (x: string, mode?: string) => void; toggle?: () => void; close?: () => void };
+type Api = {
+  cursor?: () => Promise<[number, number, number, number] | null>;
+  listen?: () => void; open_app?: () => void; reset_position?: () => void;
+  busy?: (b: boolean) => void;
+  report?: (x: unknown) => void; shape?: (cols: number, rows: number, runs: number[][]) => void; snapshot?: (x: string, mode?: string) => void; toggle?: () => void; close?: () => void };
 const api = (): Api | undefined => (window as unknown as { pywebview?: { api?: Api } }).pywebview?.api;
 
 const link = connect(WS, LIPSYNC_MS, {
   onWake: () => behaviour?.wake(),
   onToggle: () => api()?.toggle?.(),
   onOfflineLong: () => { if (!STANDALONE) api()?.close?.(); },
+  onGesture: (name) => behaviour?.gesture(name),
+  onRelease: (name) => behaviour?.release(name),
+  onReset: () => api()?.reset_position?.(),
+  onBusy: (b) => api()?.busy?.(b),                // the window pins him to the E-cores while Whisper works
+  onMood: (m) => behaviour?.setMood(m),
 });
 
 // Hidden (tray toggle, or a fullscreen game in front): stop drawing entirely
 let hidden = false;
-(window as unknown as { maxAvatar: unknown }).maxAvatar = { setHidden: (h: boolean) => { hidden = h; } };
+let captureLabel = "";
+(window as unknown as { maxAvatar: unknown }).maxAvatar = {
+  setHidden: (h: boolean) => { hidden = h; },
+  // for checks: play / freeze a gesture, look at a point, save the next frame (canvas only)
+  gesture: (name: GestureName) => behaviour?.gesture(name),
+  freeze: (name: GestureName | null, age = 0) => behaviour?.freeze(name, age),
+  look: (x: number | null, y = 0) => { lookOverride = x === null ? null : [x, y]; },
+  capture: (label: string) => { captureLabel = label; },
+  defs: GESTURES,
+  talks: TALK,
+  morph: (suffix: string | null, w = 1) => (vrm && behaviour ? behaviour.face.hold(vrm, suffix, w) : -1),
+  talk: (name: TalkName | null, beat = 0) => behaviour?.holdTalk(name, beat),
+  mood: (kind: "pleased" | "sorry") => behaviour?.setMood(kind),
+  // frame timing: start recording, then read [time, work ms] per drawn frame; switch parts off to compare
+  timing: (on: boolean) => { const out = timings; timings = []; timingOn = on; return out; },
+  switches: (s: Partial<typeof switches>) => Object.assign(switches, s),
+  state: () => ({ mode: modeOf(link), gesture: behaviour?.playing ?? null, talk: behaviour?.talking ?? null, armSpeed: behaviour?.armSpeed ?? 0 }),
+};
+let lookOverride: [number, number] | null = null;
+let timings: number[][] = [];
+let timingOn = false;
+const switches = { shape: true, cursor: true };
 const loadStart = performance.now();
 let loadMs = 0;
 
@@ -95,6 +129,7 @@ const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 loader.load(MODEL, (gltf) => {
   const v = gltf.userData.vrm as VRM;
+  nameMorphs(gltf.scene, gltf.parser as never);
   VRMUtils.removeUnnecessaryVertices(gltf.scene);
   VRMUtils.combineSkeletons(gltf.scene);
   VRMUtils.rotateVRM0(v);                       // VRoid 0.x models face -Z
@@ -153,10 +188,7 @@ function sharpenTextures(root: THREE.Object3D) {
 /** Arms down from the T-pose the model is exported in. */
 function restPose(v: VRM) {
   const h = v.humanoid;
-  h.getNormalizedBoneNode("leftUpperArm")?.rotation.set(0, 0, 1.2);
-  h.getNormalizedBoneNode("rightUpperArm")?.rotation.set(0, 0, -1.2);
-  h.getNormalizedBoneNode("leftLowerArm")?.rotation.set(0, -0.25, 0.1);
-  h.getNormalizedBoneNode("rightLowerArm")?.rotation.set(0, 0.25, -0.1);
+  for (const [bone, r] of Object.entries(REST)) h.getNormalizedBoneNode(bone as never)?.rotation.set(...r);
 }
 
 // ----- loop with a frame cap -----
@@ -187,10 +219,22 @@ function frame(now: number) {
   if (vrm && behaviour) {
     behaviour.update(modeOf(link), link, dt);
     vrm.update(dt);                                              // expressions, look-at, spring bones (hair)
+    behaviour.face.apply();                                     // after vrm.update: brows, eyes, mouth corners
   }
   renderer.render(scene, camera);
-  if (vrm && now - shapeAt > 200) sendShape(now);
+  if (vrm && behaviour && switches.shape) {
+    if (behaviour.armSpeed > ARMS_FAST) {        // arms on the move: the whole window, so nothing is clipped
+      if (now > wholeUntil) sendWhole();
+      wholeUntil = now + 400;
+    }
+    if (now - shapeAt > SHAPE_EVERY) sendShape(now);
+  }
   if (SNAPSHOT && vrm && clock.elapsedTime > 3) snapOnModeChange();
+  if (captureLabel) {
+    api()?.snapshot?.(renderer.domElement.toDataURL("image/png"), captureLabel);
+    captureLabel = "";
+  }
+  if (timingOn) timings.push([now, performance.now() - t0]);
   frameMsSum += performance.now() - t0;
   statFrames++;
   frames++;
@@ -202,53 +246,133 @@ function frame(now: number) {
 }
 requestAnimationFrame(frame);
 
+// ----- the mouse: he looks at it when it's near -----
+const head = new THREE.Vector3();
+let cursorBusy = false;
+setInterval(async () => {
+  const a = api();
+  if (!behaviour || !vrm || hidden || cursorBusy) return;
+  if (lookOverride) { behaviour.setCursor(lookOverride[0], lookOverride[1]); return; }
+  if (!a?.cursor || !switches.cursor || modeOf(link) === "asleep") return;
+  cursorBusy = true;
+  try {
+    const c = await a.cursor();                   // pointer relative to the window, and its size (screen px)
+    if (!c) { behaviour.setCursor(null); return; }
+    const [cx, cy, w, h] = c;
+    vrm.humanoid.getNormalizedBoneNode("head")?.getWorldPosition(head);
+    head.y += 0.08;                               // eyes, not the base of the skull
+    head.project(camera);
+    const hx = ((head.x + 1) / 2) * w, hy = ((1 - head.y) / 2) * h;
+    const x = (cx - hx) / h, y = (cy - hy) / h;   // in window heights
+    behaviour.setCursor(Math.hypot(x, y) < 3.5 ? x : null, y);
+  } catch {
+    /* window closing */
+  } finally {
+    cursorBusy = false;
+  }
+}, 50);
+
+// ----- clicks: one = talk to Max, two = open the app; a drag (pywebview moves the window) is neither -----
+let down: { x: number; y: number; at: number } | null = null;
+let clickTimer = 0;
+window.addEventListener("mousedown", (e) => { if (e.button === 0) down = { x: e.screenX, y: e.screenY, at: performance.now() }; });
+window.addEventListener("mouseup", (e) => {
+  if (e.button !== 0 || !down) return;
+  const moved = Math.hypot(e.screenX - down.x, e.screenY - down.y);
+  const quick = performance.now() - down.at < 400;
+  down = null;
+  if (moved > 4 || !quick) return;
+  if (clickTimer) {                               // second click: a double click
+    clearTimeout(clickTimer);
+    clickTimer = 0;
+    api()?.open_app?.();
+    return;
+  }
+  clickTimer = window.setTimeout(() => {
+    clickTimer = 0;
+    behaviour?.wake();
+    api()?.listen?.();
+  }, 280);
+});
+
 // ----- outline: the window only takes clicks where Max is drawn -----
-// A few times a second the frame is shrunk to a coarse grid (one cell per SHAPE_CELL px); cells he
-// covers, grown by SHAPE_GROW cells so his edges and small movements stay inside, go to the window
-// as runs per row. The window clips itself to them: clicks anywhere else reach what's behind.
+// Ten times a second he is drawn again into a tiny off-screen picture (one pixel per SHAPE_CELL
+// screen px), read back without waiting for the GPU (reading the real canvas stalled a frame each
+// time: the "lag"). Cells he covers in the last half second, grown by SHAPE_GROW cells, go to the
+// window as runs per row, and the window clips itself to them: clicks anywhere else reach what's
+// behind. While his arms move fast (a wave, a shrug, hands coming up to talk) the outline can't
+// keep up, so the whole window is kept until they settle.
 const SHAPE_CELL = 4;
 const SHAPE_GROW = 2;
-const shapeCanvas = document.createElement("canvas");
-const shapeCtx = shapeCanvas.getContext("2d", { willReadFrequently: true })!;
+const SHAPE_EVERY = 100;           // ms
+const SHAPE_KEEP = 500;            // ms of recent outlines kept together (small movements stay inside)
+const ARMS_FAST = 1.2;             // rad/s
+const mask = new THREE.WebGLRenderTarget(1, 1);
+const maskMaterial = new THREE.MeshBasicMaterial();   // only coverage matters: the cheapest shader
+let maskBuf = new Uint8Array(4);
+let maskBusy = false;
 let shapeAt = 0;
+let wholeUntil = 0;
 let lastShape = "-";
+let recent: { at: number; solid: Uint8Array }[] = [];
+
+function sendWhole() {
+  lastShape = "whole";
+  recent = [];
+  api()?.shape?.(0, 0, []);                        // no runs = the whole window
+}
 
 function sendShape(now: number) {
   shapeAt = now;
   const a = api();
-  if (!a?.shape) return;
+  if (!a?.shape || maskBusy || now < wholeUntil) return;
   const cols = Math.ceil(window.innerWidth / SHAPE_CELL);
   const rows = Math.ceil(window.innerHeight / SHAPE_CELL);
-  if (shapeCanvas.width !== cols || shapeCanvas.height !== rows) {
-    shapeCanvas.width = cols;
-    shapeCanvas.height = rows;
+  if (mask.width !== cols || mask.height !== rows) {
+    mask.setSize(cols, rows);
+    maskBuf = new Uint8Array(cols * rows * 4);
+    recent = [];
   }
-  shapeCtx.clearRect(0, 0, cols, rows);
-  shapeCtx.drawImage(renderer.domElement, 0, 0, cols, rows);   // right after render: the buffer is still there
-  const px = shapeCtx.getImageData(0, 0, cols, rows).data;
-  const solid = new Uint8Array(cols * rows);
-  for (let y = 0; y < rows; y++)
-    for (let x = 0; x < cols; x++)
-      if (px[(y * cols + x) * 4 + 3] > 10) {
-        for (let dy = -SHAPE_GROW; dy <= SHAPE_GROW; dy++)
-          for (let dx = -SHAPE_GROW; dx <= SHAPE_GROW; dx++) {
-            const yy = y + dy, xx = x + dx;
-            if (yy >= 0 && yy < rows && xx >= 0 && xx < cols) solid[yy * cols + xx] = 1;
-          }
+  renderer.setRenderTarget(mask);
+  scene.overrideMaterial = maskMaterial;
+  renderer.render(scene, camera);
+  scene.overrideMaterial = null;
+  renderer.setRenderTarget(null);
+  maskBusy = true;
+  renderer.readRenderTargetPixelsAsync(mask, 0, 0, cols, rows, maskBuf).then((px) => {
+    maskBusy = false;
+    const solid = new Uint8Array(cols * rows);
+    for (let y = 0; y < rows; y++)                  // the render target's rows run bottom-up
+      for (let x = 0; x < cols; x++)
+        if (px[((rows - 1 - y) * cols + x) * 4 + 3] > 10) solid[y * cols + x] = 1;
+    const t = performance.now();
+    recent = recent.filter((r) => t - r.at < SHAPE_KEEP);
+    recent.push({ at: t, solid });
+    const grown = new Uint8Array(cols * rows);
+    for (const r of recent)
+      for (let y = 0; y < rows; y++)
+        for (let x = 0; x < cols; x++) {
+          if (!r.solid[y * cols + x]) continue;
+          for (let dy = -SHAPE_GROW; dy <= SHAPE_GROW; dy++)
+            for (let dx = -SHAPE_GROW; dx <= SHAPE_GROW; dx++) {
+              const yy = y + dy, xx = x + dx;
+              if (yy >= 0 && yy < rows && xx >= 0 && xx < cols) grown[yy * cols + xx] = 1;
+            }
+        }
+    const runs: number[][] = [];
+    for (let y = 0; y < rows; y++) {
+      let start = -1;
+      for (let x = 0; x <= cols; x++) {
+        const on = x < cols && grown[y * cols + x] === 1;
+        if (on && start < 0) start = x;
+        if (!on && start >= 0) { runs.push([y, start, x]); start = -1; }
       }
-  const runs: number[][] = [];
-  for (let y = 0; y < rows; y++) {
-    let start = -1;
-    for (let x = 0; x <= cols; x++) {
-      const on = x < cols && solid[y * cols + x] === 1;
-      if (on && start < 0) start = x;
-      if (!on && start >= 0) { runs.push([y, start, x]); start = -1; }
     }
-  }
-  const key = runs.join(";");
-  if (key === lastShape) return;
-  lastShape = key;
-  a.shape(cols, rows, runs);
+    const key = runs.join(";");
+    if (key === lastShape || performance.now() < wholeUntil) return;
+    lastShape = key;
+    a.shape!(cols, rows, runs);
+  }).catch(() => { maskBusy = false; });
 }
 
 // ?snapshot=1: one picture of the canvas per mode, once the pose has settled (for checks)

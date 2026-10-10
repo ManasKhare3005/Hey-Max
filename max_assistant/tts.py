@@ -67,6 +67,59 @@ def loudness_envelope(audio: np.ndarray, sr: int, rate: int = 60) -> list[float]
     return [round(float(v), 2) for v in np.clip(rms / peak, 0, 1)]
 
 
+VISEMES = ("aa", "ih", "ou", "ee", "oh")
+# Each mouth shape's spot on two voice features (in standard deviations from this sentence's
+# average): "open" = energy around F1 of open vowels (600-1100 Hz) vs closed ones (200-500 Hz);
+# "front" = F2 of i/e (1700-3200 Hz) vs rounded o/u (500-1200 Hz).
+_VISEME_SPOT = {"aa": (1.1, 0.0), "ee": (0.2, 1.0), "ih": (-0.7, 1.1), "oh": (0.3, -1.0), "ou": (-0.9, -1.0)}
+
+
+def viseme_track(audio: np.ndarray, sr: int, rate: int = 60) -> list[list[float]]:
+    """Mouth shape per frame, `rate` times a second: weights for VISEMES (aa ih ou ee oh), each 0-1.
+
+    A cheap formant guess, not phoneme recognition: two band-energy ratios (how open, how front
+    the vowel sounds), measured against the sentence's own average so they suit any voice, pick a
+    blend of shapes; loudness sets how far the mouth opens, and hiss (s, f, sh: energy above 4 kHz)
+    mostly closes it. A few ms per sentence.
+    """
+    hop = max(1, sr // rate)
+    n = len(audio) // hop
+    if n == 0:
+        return []
+    size = 1 << int(np.ceil(np.log2(max(hop * 2, 256))))
+    x = np.pad(np.asarray(audio, dtype=np.float32), (0, size))
+    idx = np.arange(n)[:, None] * hop + np.arange(size)[None, :]
+    spec = np.abs(np.fft.rfft(x[idx] * np.hanning(size), axis=1)) ** 2
+    freqs = np.fft.rfftfreq(size, 1 / sr)
+
+    def band(lo, hi):
+        return 10 * np.log10(spec[:, (freqs >= lo) & (freqs < hi)].sum(axis=1) + 1e-10)
+
+    open_f = band(600, 1100) - band(200, 500)
+    front_f = band(1700, 3200) - band(500, 1200)
+    e_voice = spec[:, (freqs >= 150) & (freqs < 4000)].sum(axis=1)
+    e_hiss = spec[:, freqs >= 4000].sum(axis=1)
+    hiss = e_hiss / (e_voice + e_hiss + 1e-10)
+    env = loudness_envelope(audio, sr, rate)
+    loud = np.asarray((env + [0.0] * n)[:n])
+    voiced = (loud > 0.25) & (hiss < 0.5)
+    if voiced.sum() < 3:
+        voiced = loud > 0
+    if not voiced.any():
+        return [[0.0] * len(VISEMES) for _ in range(n)]
+
+    def z(f):
+        return (f - f[voiced].mean()) / (f[voiced].std() + 1e-6)
+
+    zo, zf = z(open_f), z(front_f)
+    amount = loud * np.clip(1.3 - 1.6 * hiss, 0.15, 1.0)
+    spots = np.array([_VISEME_SPOT[k] for k in VISEMES])                     # (5, 2)
+    d2 = (zo[:, None] - spots[None, :, 0]) ** 2 + (zf[:, None] - spots[None, :, 1]) ** 2
+    w = np.exp(-d2 / 0.8)
+    w = w / (w.sum(axis=1, keepdims=True) + 1e-9)
+    return np.round(w * amount[:, None], 2).tolist()
+
+
 def trim_silence(audio: np.ndarray, sr: int, threshold: float = 0.01, keep_s: float = 0.06) -> np.ndarray:
     """Cut the silence some voices pad around every sentence (gaps between streamed sentences)."""
     loud = np.flatnonzero(np.abs(audio) > threshold)
@@ -187,7 +240,7 @@ class Speaker:
             self.sapi = SapiTTS(speed)
 
     interrupts = None   # wakeword.InterruptSpotter: lets "stop" / "Hey Max" cut Max off
-    on_speech = None    # (action, data): "start" with the loudness envelope just before playing, then "end"
+    on_speech = None    # (action, data): "start" with loudness + mouth shapes just before playing, then "end"
 
     def _tell(self, action: str, data: dict):
         if self.on_speech is not None:
@@ -196,8 +249,16 @@ class Speaker:
             except Exception as exc:                   # the avatar must never break speech
                 log.debug("on_speech failed: %s", exc)
 
-    def _starting(self, audio, sr: int):
-        self._tell("start", {"env": loudness_envelope(audio, sr), "rate": 60, "duration": round(len(audio) / sr, 2)})
+    def _starting(self, audio, sr: int, text: str = ""):
+        if self.on_speech is None:
+            return
+        try:
+            vis = viseme_track(audio, sr)
+        except Exception as exc:
+            log.debug("viseme track failed: %s", exc)
+            vis = []
+        self._tell("start", {"env": loudness_envelope(audio, sr), "vis": vis, "rate": 60,
+                             "duration": round(len(audio) / sr, 2), "text": text})
 
     def say(self, text: str) -> str | None:
         """Speak `text`. Returns "stop" or "wake" if the user interrupted, else None."""
@@ -213,10 +274,10 @@ class Speaker:
                 from .audio import play
 
                 audio, sr = self.piper.synthesize(text)
-                self._starting(audio, sr)
+                self._starting(audio, sr, text)
                 play(audio, sr, self.device)
             else:
-                self._tell("start", {"env": [], "rate": 60, "duration": 0})     # no audio to measure: a generic mouth
+                self._tell("start", {"env": [], "rate": 60, "duration": 0, "text": text})  # no audio: a generic mouth
                 self.sapi.say(text)
         finally:
             self._tell("end", {"cut": False})
@@ -234,7 +295,7 @@ class Speaker:
         audio, sr = self.piper.synthesize(text)
         self.mic.flush()
         self.interrupts.reset()
-        self._starting(audio, sr)
+        self._starting(audio, sr, text)
         sd.play(audio, sr, device=self.device)
         try:
             heard = watch_for_interrupt(self.mic.read, self.interrupts, len(audio) / sr + 0.15, text)

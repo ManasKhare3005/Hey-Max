@@ -6,10 +6,14 @@ A separate process, like the overlay, so it can never stall the voice loop. To s
 way of the language model and Whisper:
 - it renders on the integrated GPU (Chromium's --force_low_power_gpu for this window's own
   WebView2 instance), so the NVIDIA card keeps all its memory for the model;
-- it and its browser processes are pinned to the CPU's efficiency cores (measured: Whisper +32%
-  slower otherwise, +3% this way);
-- it drops to `busy_fps` while Whisper transcribes and to `asleep_fps` when the models sleep;
+- while Whisper transcribes, it and its browser processes are pinned to the CPU's efficiency
+  cores (measured: Whisper +32% slower otherwise, +3% this way) and draw at `busy_fps`. Not all
+  the time: on the E-cores alone he dropped a frame or two a second (3.3 ms a frame vs 2 ms);
+- it drops to `asleep_fps` when the models sleep;
 - it hides (and stops drawing) while a fullscreen game is in front.
+
+Mouse: click him = talk to Max, double click = open the Max app, drag = move (remembered in
+data/avatar-position.json; tray "Reset avatar position" puts him back above the clock).
 
 Max starts it (config `avatar.enabled`); it closes itself if Max stays gone. Manual run:
 .venv\\Scripts\\pythonw -m max_assistant.avatar [--fps 90] [--debug] [--model avatar/x.vrm]
@@ -31,7 +35,8 @@ log = logging.getLogger(__name__)
 PAGE = ROOT / "dashboard" / "dist" / "avatar.html"
 STATS = ROOT / "data" / "avatar-stats.json"
 SNAPSHOT = ROOT / "data" / "avatar-snapshot.png"
-SIZE = (340, 420)                  # head and upper body
+POSITION = ROOT / "data" / "avatar-position.json"     # where he was dragged to (window pixels)
+SIZE = (400, 420)                  # head and upper body, with room for his hands either side
 TITLE = "Max avatar"
 
 # Fullscreen windows from these never hide the avatar (browsers, video, desktop): only games do
@@ -143,12 +148,15 @@ def foreground_state() -> tuple[bool, bool, str]:
 class AvatarApi:
     """Called by the page. Attributes are underscored so pywebview doesn't walk the window."""
 
-    def __init__(self, stats_file: Path):
+    def __init__(self, stats_file: Path, base_url: str = "http://127.0.0.1:8765"):
         self._stats_file = stats_file
+        self._base = base_url.rstrip("/")
         self._window = None
         self._hidden_by_user = False
         self._hidden_by_game = False
         self._lock = threading.Lock()
+        self._e_cores: list[int] = []     # set by main(); [] = don't pin
+        self._busy = False                # Whisper is transcribing: keep off the cores it uses
 
     def report(self, stats: dict):
         try:
@@ -190,10 +198,73 @@ class AvatarApi:
                 part = g.CreateRectRgn(*r)
                 g.CombineRgn(region, region, part, 2)                   # RGN_OR
                 g.DeleteObject(part)
-            if not u.SetWindowRgn(hwnd, region, True):                  # Windows owns the region after this
+            if not u.SetWindowRgn(hwnd, region, False):     # no forced repaint; Windows owns the region after this
                 g.DeleteObject(region)
         except Exception as exc:
             log.debug("avatar outline: %s", exc)
+
+    def busy(self, flag: bool):
+        """From the page: Whisper started / finished transcribing. Only then is the avatar held on the
+        E-cores (Whisper uses the others); the rest of the time it may use every core, because the
+        E-cores alone drop frames."""
+        self._busy = bool(flag)
+        threading.Thread(target=self._pin, daemon=True).start()
+
+    def _affinity(self) -> list[int]:
+        import psutil
+
+        if self._busy and self._e_cores:
+            return self._e_cores
+        return list(range(psutil.cpu_count() or 1))
+
+    def _pin(self):
+        if not self._e_cores:
+            return
+        try:
+            pin_tree(self._affinity())
+        except Exception as exc:
+            log.debug("pinning: %s", exc)
+
+    def cursor(self):
+        """The mouse relative to the window, and the window's size (screen pixels), or None if hidden."""
+        if self._hidden_by_user or self._hidden_by_game:
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            u = ctypes.windll.user32
+            hwnd = u.FindWindowW(None, TITLE)
+            pt, rect = wintypes.POINT(), wintypes.RECT()
+            if not hwnd or not u.GetCursorPos(ctypes.byref(pt)) or not u.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return None
+            return [pt.x - rect.left, pt.y - rect.top, rect.right - rect.left, rect.bottom - rect.top]
+        except Exception:
+            return None
+
+    def listen(self):
+        """Clicked: Max listens for a command, as after the wake word."""
+        import requests
+
+        def go():
+            try:
+                requests.post(self._base + "/api/control/listen", timeout=3)
+            except Exception as exc:
+                log.debug("avatar listen: %s", exc)
+
+        threading.Thread(target=go, daemon=True).start()
+
+    def open_app(self):
+        """Double-clicked: the Max window."""
+        from ..app import open_app
+
+        open_app()
+
+    def reset_position(self):
+        """Tray "Reset avatar position": back above the clock, and forget the dragged-to spot."""
+        POSITION.unlink(missing_ok=True)
+        if self._window is not None:
+            self._window.move(*corner_position())
 
     def toggle(self):
         """Tray "Show / hide avatar" (arrives from Max as an event the page forwards here)."""
@@ -282,6 +353,83 @@ def see_through(window):
         log.warning("avatar: couldn't make the background transparent: %s", exc)
 
 
+def saved_position(path: Path | None = None, size: tuple[int, int] | None = None) -> tuple[int, int] | None:
+    """Where he was dragged to last time, if that spot is still on a screen (monitors change).
+    With the window's `size` now: shifted so he stays where he was if the window grew or shrank
+    (same centre, same bottom edge)."""
+    try:
+        pos = json.loads((path or POSITION).read_text(encoding="utf-8"))
+        x, y, w, h = int(pos["x"]), int(pos["y"]), int(pos.get("w", SIZE[0])), int(pos.get("h", SIZE[1]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        centre = wintypes.POINT(x + w // 2, y + h // 3)          # his head must be on a screen
+        if not ctypes.windll.user32.MonitorFromPoint(centre, 0):  # MONITOR_DEFAULTTONULL
+            return None
+    except Exception:
+        pass
+    if size:
+        return x + (w - size[0]) // 2, y + h - size[1]
+    return x, y
+
+
+def restore_position():
+    """Move the window to the remembered spot (window pixels, as saved)."""
+    rect = window_rect()
+    pos = saved_position(size=(rect[2] - rect[0], rect[3] - rect[1]) if rect else None)
+    if pos is None:
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.user32.FindWindowW(None, TITLE)
+        if hwnd:   # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, pos[0], pos[1], 0, 0, 0x0001 | 0x0004 | 0x0010)
+    except Exception as exc:
+        log.debug("avatar restore position: %s", exc)
+
+
+class PositionKeeper:
+    """Saves the window's spot once a drag has settled (two checks in a row at the same place)."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or POSITION
+        self.last = None
+        self.pending = False
+
+    def check(self, rect: tuple[int, int, int, int] | None):
+        if rect is None:
+            return
+        if self.last is not None and rect != self.last:
+            self.pending = True
+        elif self.pending:
+            self.pending = False
+            x, y, r, b = rect
+            try:
+                self.path.write_text(json.dumps({"x": x, "y": y, "w": r - x, "h": b - y}), encoding="utf-8")
+            except OSError:
+                pass
+        self.last = rect
+
+
+def window_rect() -> tuple[int, int, int, int] | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.windll.user32
+        hwnd = u.FindWindowW(None, TITLE)
+        rect = wintypes.RECT()
+        if hwnd and u.IsWindowVisible(hwnd) and u.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        pass
+    return None
+
+
 def corner_position(size=SIZE, margin: int = 8) -> tuple[int, int]:
     """Bottom-right of the work area (the screen minus the taskbar), i.e. just above the clock."""
     try:
@@ -296,14 +444,13 @@ def corner_position(size=SIZE, margin: int = 8) -> tuple[int, int]:
         return 100, 100
 
 
-def watchers(api: AvatarApi, cpus: list[int], hide_for_games: bool, games: list[str], stop: threading.Event):
-    """Every couple of seconds: keep new WebView2 processes on the E-cores; hide for fullscreen games."""
+def watchers(api: AvatarApi, hide_for_games: bool, games: list[str], stop: threading.Event):
+    """Every couple of seconds: keep new WebView2 processes on the right cores; hide for fullscreen
+    games; remember where he was dragged to."""
+    keeper = PositionKeeper()
     while not stop.wait(1.5):
-        if cpus:
-            try:
-                pin_tree(cpus)
-            except Exception as exc:
-                log.debug("pinning: %s", exc)
+        keeper.check(window_rect())
+        api._pin()
         if hide_for_games:
             try:
                 api._set_game(should_hide(*foreground_state(), extra_games=games))
@@ -330,7 +477,7 @@ def main(argv: list[str] | None = None):
     p = argparse.ArgumentParser(prog="max_assistant.avatar")
     p.add_argument("--fps", type=int, default=a.get("fps", 90), help="frame cap; 90 = even pacing on the 180 Hz screen, 0 = every refresh")
     p.add_argument("--asleep-fps", type=int, default=a.get("asleep_fps", 30))
-    p.add_argument("--busy-fps", type=int, default=a.get("busy_fps", 30), help="while Whisper transcribes")
+    p.add_argument("--busy-fps", type=int, default=a.get("busy_fps", 60), help="while Whisper transcribes")
     p.add_argument("--frame", choices=["upper", "full"], default=a.get("frame", "upper"))
     p.add_argument("--tex", type=int, default=0, help="shrink textures above this size (0 = originals)")
     p.add_argument("--scale", type=float, default=a.get("scale", 2), help="render pixels per screen pixel (2 = supersampled)")
@@ -365,16 +512,16 @@ def main(argv: list[str] | None = None):
              # encoded: a "/" in the query would confuse pywebview's file server
              + (f"&model={quote(args.model, safe='')}" if args.model else ""))
     x, y = corner_position()
-    api = AvatarApi(STATS)
+    api = AvatarApi(STATS, f"http://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}")
     api._window = webview.create_window(
         TITLE, url=str(PAGE) + query, js_api=api, width=SIZE[0], height=SIZE[1], x=x, y=y,
         frameless=True, easy_drag=True, on_top=True, resizable=False, transparent=True, shadow=False,
         focus=False, background_color="#000000",
     )
-    api._window.events.shown += lambda: see_through(api._window)
-    cpus = efficiency_cores() if a.get("efficiency_cores", True) else []
+    api._window.events.shown += lambda: (see_through(api._window), restore_position())
+    api._e_cores = efficiency_cores() if a.get("efficiency_cores", True) else []
     stop = threading.Event()
-    threading.Thread(target=watchers, args=(api, cpus, a.get("hide_for_fullscreen_games", True),
+    threading.Thread(target=watchers, args=(api, a.get("hide_for_fullscreen_games", True),
                                             a.get("games", []) or [], stop), daemon=True).start()
     try:
         webview.start(private_mode=False, storage_path=str(ROOT / "data" / "avatar-webview"))
