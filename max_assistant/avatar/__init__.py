@@ -166,6 +166,35 @@ class AvatarApi:
         if mode:
             SNAPSHOT.with_name(f"avatar-snapshot-{mode}.png").write_bytes(data)
 
+    def shape(self, cols: int, rows: int, runs: list):
+        """Max's outline from the page: clip the window to it so clicks around him reach what's behind."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            u, g = ctypes.windll.user32, ctypes.windll.gdi32
+            hwnd = u.FindWindowW(None, TITLE)
+            if not hwnd:
+                return
+            rect = wintypes.RECT()
+            u.GetWindowRect(hwnd, ctypes.byref(rect))
+            g.CreateRectRgn.restype = wintypes.HRGN
+            g.CombineRgn.argtypes = [wintypes.HRGN, wintypes.HRGN, wintypes.HRGN, ctypes.c_int]
+            g.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+            u.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+            if not runs:                        # nothing drawn (yet): keep the whole window, never lose it
+                u.SetWindowRgn(hwnd, None, True)
+                return
+            region = g.CreateRectRgn(0, 0, 0, 0)
+            for r in outline_rects(cols, rows, runs, rect.right - rect.left, rect.bottom - rect.top):
+                part = g.CreateRectRgn(*r)
+                g.CombineRgn(region, region, part, 2)                   # RGN_OR
+                g.DeleteObject(part)
+            if not u.SetWindowRgn(hwnd, region, True):                  # Windows owns the region after this
+                g.DeleteObject(region)
+        except Exception as exc:
+            log.debug("avatar outline: %s", exc)
+
     def toggle(self):
         """Tray "Show / hide avatar" (arrives from Max as an event the page forwards here)."""
         self._hidden_by_user = not self._hidden_by_user
@@ -197,6 +226,60 @@ class AvatarApi:
                     ctypes.windll.user32.ShowWindow(hwnd, 0 if hidden else 4)       # SW_HIDE / SW_SHOWNOACTIVATE
             except Exception as exc:
                 log.debug("avatar show/hide: %s", exc)
+
+
+def outline_rects(cols: int, rows: int, runs: list, width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """Grid runs [row, first col, end col) -> window-pixel rectangles; rows with the same runs merge."""
+    cw, ch = width / max(1, cols), height / max(1, rows)
+    by_row: dict[int, list[tuple[int, int]]] = {}
+    for y, x0, x1 in runs:
+        by_row.setdefault(int(y), []).append((int(x0), int(x1)))
+    rects: list[tuple[int, int, int, int]] = []
+    open_: dict[tuple[int, int], int] = {}                        # (x0, x1) -> first row of its block
+    for y in range(rows + 1):
+        here = set(by_row.get(y, []))
+        for span in [s for s in open_ if s not in here]:
+            y0 = open_.pop(span)
+            rects.append((round(span[0] * cw), round(y0 * ch), round(span[1] * cw), round(y * ch)))
+        for span in here:
+            open_.setdefault(span, y)
+    return rects
+
+
+def see_through(window):
+    """Make everything the page doesn't draw on transparent (call once the window exists).
+
+    pywebview only makes the web page transparent: the form behind it keeps its default light
+    grey, which showed as a white box around Max. Painting the form black and giving the window a
+    "transparent gradient" accent with a fully transparent colour (SetWindowCompositionAttribute,
+    as taskbar tools use) makes DWM show that area as see-through. Tried and dropped: a colour key
+    (whole window click-through, so Max couldn't be dragged), DwmExtendFrameIntoClientArea and
+    blur-behind with an empty region (both left a black box on this frameless window).
+    """
+    try:
+        import ctypes
+
+        from System import Action
+        from System.Drawing import Color
+
+        form = window.native
+
+        class ACCENT(ctypes.Structure):
+            _fields_ = [("state", ctypes.c_int), ("flags", ctypes.c_int), ("color", ctypes.c_uint), ("anim", ctypes.c_int)]
+
+        class WCA_DATA(ctypes.Structure):
+            _fields_ = [("attr", ctypes.c_int), ("data", ctypes.c_void_p), ("size", ctypes.c_size_t)]
+
+        def apply():
+            form.BackColor = Color.Black
+            accent = ACCENT(2, 2, 0x00000000, 0)       # ACCENT_ENABLE_TRANSPARENTGRADIENT, colour with alpha 0
+            data = WCA_DATA(19, ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p), ctypes.sizeof(accent))  # WCA_ACCENT_POLICY
+            ctypes.windll.user32.SetWindowCompositionAttribute(ctypes.c_void_p(form.Handle.ToInt64()), ctypes.byref(data))
+            form.Invalidate()
+
+        form.Invoke(Action(apply))
+    except Exception as exc:
+        log.warning("avatar: couldn't make the background transparent: %s", exc)
 
 
 def corner_position(size=SIZE, margin: int = 8) -> tuple[int, int]:
@@ -274,7 +357,8 @@ def main(argv: list[str] | None = None):
     STATS.parent.mkdir(parents=True, exist_ok=True)
     STATS.unlink(missing_ok=True)
     ws = args.ws or f"ws://{d.get('host', '127.0.0.1')}:{d.get('port', 8765)}/api/ws"
-    query = (f"?fps={args.fps}&asleep_fps={args.asleep_fps}&busy_fps={args.busy_fps}&frame={args.frame}"
+    # v= the build's time: WebView2 caches avatar.html, and would otherwise keep showing an old build
+    query = (f"?v={int(PAGE.stat().st_mtime)}&fps={args.fps}&asleep_fps={args.asleep_fps}&busy_fps={args.busy_fps}&frame={args.frame}"
              f"&tex={args.tex}&scale={args.scale:g}&lipsync_ms={a.get('lip_sync_delay_ms', 80)}"
              f"&ws={quote(ws, safe='')}&standalone={int(args.standalone)}"
              + ("&debug=1" if args.debug else "") + ("&snapshot=1" if args.snapshot else "")
@@ -287,6 +371,7 @@ def main(argv: list[str] | None = None):
         frameless=True, easy_drag=True, on_top=True, resizable=False, transparent=True, shadow=False,
         focus=False, background_color="#000000",
     )
+    api._window.events.shown += lambda: see_through(api._window)
     cpus = efficiency_cores() if a.get("efficiency_cores", True) else []
     stop = threading.Event()
     threading.Thread(target=watchers, args=(api, cpus, a.get("hide_for_fullscreen_games", True),

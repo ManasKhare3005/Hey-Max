@@ -76,7 +76,7 @@ window.addEventListener("resize", () => {
 let vrm: VRM | null = null;
 let behaviour: Behaviour | null = null;
 
-type Api = { report?: (x: unknown) => void; snapshot?: (x: string, mode?: string) => void; toggle?: () => void; close?: () => void };
+type Api = { report?: (x: unknown) => void; shape?: (cols: number, rows: number, runs: number[][]) => void; snapshot?: (x: string, mode?: string) => void; toggle?: () => void; close?: () => void };
 const api = (): Api | undefined => (window as unknown as { pywebview?: { api?: Api } }).pywebview?.api;
 
 const link = connect(WS, LIPSYNC_MS, {
@@ -189,6 +189,7 @@ function frame(now: number) {
     vrm.update(dt);                                              // expressions, look-at, spring bones (hair)
   }
   renderer.render(scene, camera);
+  if (vrm && now - shapeAt > 200) sendShape(now);
   if (SNAPSHOT && vrm && clock.elapsedTime > 3) snapOnModeChange();
   frameMsSum += performance.now() - t0;
   statFrames++;
@@ -200,6 +201,55 @@ function frame(now: number) {
   }
 }
 requestAnimationFrame(frame);
+
+// ----- outline: the window only takes clicks where Max is drawn -----
+// A few times a second the frame is shrunk to a coarse grid (one cell per SHAPE_CELL px); cells he
+// covers, grown by SHAPE_GROW cells so his edges and small movements stay inside, go to the window
+// as runs per row. The window clips itself to them: clicks anywhere else reach what's behind.
+const SHAPE_CELL = 4;
+const SHAPE_GROW = 2;
+const shapeCanvas = document.createElement("canvas");
+const shapeCtx = shapeCanvas.getContext("2d", { willReadFrequently: true })!;
+let shapeAt = 0;
+let lastShape = "-";
+
+function sendShape(now: number) {
+  shapeAt = now;
+  const a = api();
+  if (!a?.shape) return;
+  const cols = Math.ceil(window.innerWidth / SHAPE_CELL);
+  const rows = Math.ceil(window.innerHeight / SHAPE_CELL);
+  if (shapeCanvas.width !== cols || shapeCanvas.height !== rows) {
+    shapeCanvas.width = cols;
+    shapeCanvas.height = rows;
+  }
+  shapeCtx.clearRect(0, 0, cols, rows);
+  shapeCtx.drawImage(renderer.domElement, 0, 0, cols, rows);   // right after render: the buffer is still there
+  const px = shapeCtx.getImageData(0, 0, cols, rows).data;
+  const solid = new Uint8Array(cols * rows);
+  for (let y = 0; y < rows; y++)
+    for (let x = 0; x < cols; x++)
+      if (px[(y * cols + x) * 4 + 3] > 10) {
+        for (let dy = -SHAPE_GROW; dy <= SHAPE_GROW; dy++)
+          for (let dx = -SHAPE_GROW; dx <= SHAPE_GROW; dx++) {
+            const yy = y + dy, xx = x + dx;
+            if (yy >= 0 && yy < rows && xx >= 0 && xx < cols) solid[yy * cols + xx] = 1;
+          }
+      }
+  const runs: number[][] = [];
+  for (let y = 0; y < rows; y++) {
+    let start = -1;
+    for (let x = 0; x <= cols; x++) {
+      const on = x < cols && solid[y * cols + x] === 1;
+      if (on && start < 0) start = x;
+      if (!on && start >= 0) { runs.push([y, start, x]); start = -1; }
+    }
+  }
+  const key = runs.join(";");
+  if (key === lastShape) return;
+  lastShape = key;
+  a.shape(cols, rows, runs);
+}
 
 // ?snapshot=1: one picture of the canvas per mode, once the pose has settled (for checks)
 const snapped = new Set<string>();

@@ -2462,3 +2462,13 @@ def test_avatar_hides_for_fullscreen_games_only():
     assert not should_hide(False, False, r"C:\Riot Games\VALORANT\live\VALORANT.exe")              # windowed
     assert not should_hide(False, True, r"C:\Tools\SomeApp.exe")
     assert should_hide(False, True, r"C:\Tools\MyGame.exe", extra_games=["mygame.exe"])
+
+
+def test_avatar_outline_runs_become_window_rectangles():
+    from max_assistant.avatar import outline_rects
+
+    # 10x10 grid on a 100x200 window: rows 2-4 share a span (one block), row 5 is wider, row 9 has two spans
+    runs = [[2, 3, 6], [3, 3, 6], [4, 3, 6], [5, 1, 8], [9, 0, 2], [9, 5, 10]]
+    rects = sorted(outline_rects(10, 10, runs, 100, 200))
+    assert rects == sorted([(30, 40, 60, 100), (10, 100, 80, 120), (0, 180, 20, 200), (50, 180, 100, 200)])
+    assert outline_rects(10, 10, [], 100, 200) == []
